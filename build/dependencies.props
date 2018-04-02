@@ -1,27 +1,23 @@
 <Project>
   <PropertyGroup Label="Package Versions">
-    <AspNetCoreVersion>2.1-*</AspNetCoreVersion>
+    <AspNetCoreVersion>2.0.*</AspNetCoreVersion>
     <CoreFxVersion>4.4.0-*</CoreFxVersion>
     <JsonNetVersion>11.0.2</JsonNetVersion>
-    <JilVersion>2.15.4</JilVersion>
     <SignalRVersion>1.0.0-*</SignalRVersion>
-    <NETStandardImplicitPackageVersion>2.0.0</NETStandardImplicitPackageVersion>
-    <NETCoreAppImplicitPackageVersion>2.0.0</NETCoreAppImplicitPackageVersion>
     <!-- Default values that are set to RuntimeFrameworkVersion if none is specified in BenchmarksRuntimeFrameworkVersion c.f. Directory.Build.Targets -->
     <MicrosoftNETCoreApp20PackageVersion>2.0.0</MicrosoftNETCoreApp20PackageVersion>
     <MicrosoftNETCoreApp21PackageVersion>2.1.0-preview2-26225-03</MicrosoftNETCoreApp21PackageVersion>
-    <RuntimeFrameworkVersion>2.0.0-*</RuntimeFrameworkVersion>
-    <DefaultTargetFramework>netcoreapp2.0</DefaultTargetFramework>
 
     <!--
       Following properties are specific to src/Benchmarks/Benchmarks.csproj.
       Separate to ease testing of earlier releases.
     -->
-    <BenchmarksTargetFramework>$(DefaultTargetFramework)</BenchmarksTargetFramework>
-    <BenchmarksAspNetCoreVersion>$(AspNetCoreVersion)</BenchmarksAspNetCoreVersion>
-    <BenchmarksNETStandardImplicitPackageVersion>$(NETStandardImplicitPackageVersion)</BenchmarksNETStandardImplicitPackageVersion>
-    <BenchmarksNETCoreAppImplicitPackageVersion>$(NETCoreAppImplicitPackageVersion)</BenchmarksNETCoreAppImplicitPackageVersion>
-    <BenchmarksRuntimeFrameworkVersion>$(RuntimeFrameworkVersion)</BenchmarksRuntimeFrameworkVersion>
+    <BenchmarksTargetFramework>netcoreapp2.0</BenchmarksTargetFramework>
+    <BenchmarksAspNetCoreVersion>2.0.*</BenchmarksAspNetCoreVersion>
+    <BenchmarksNETStandardImplicitPackageVersion>2.0.0</BenchmarksNETStandardImplicitPackageVersion>
+    <BenchmarksNETCoreAppImplicitPackageVersion>2.0.0</BenchmarksNETCoreAppImplicitPackageVersion>
+    <BenchmarksRuntimeFrameworkVersion>2.0.0-*</BenchmarksRuntimeFrameworkVersion>
+    <JilVersion>2.15.4</JilVersion>
     <MongoDbVersion>2.5.0</MongoDbVersion>
     <DapperVersion>1.50.4</DapperVersion>
     <NpgsqlVersion>3.2.7</NpgsqlVersion>
