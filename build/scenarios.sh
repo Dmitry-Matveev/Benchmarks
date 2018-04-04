@@ -51,6 +51,7 @@ jobs=(
   "-n Plaintext --webHost HttpSys $trend $plaintextJobs --windows-only" 
   "-n Plaintext --webHost KestrelSockets -f Benchmarks.PassthroughConnectionFilter $trend $plaintextJobs" 
   "-n StaticFiles --webHost Kestrelsockets --path plaintext $trend $plaintextJobs" 
+  "-n CopyToAsync --webHost KestrelSockets $trend $plaintextJobs"
   "-n JsonPlatform --webHost KestrelSockets $trend $jsonPlatformJobs" 
   "-n JsonPlatform --webHost KestrelLibuv $trend $jsonPlatformJobs" 
   "-n Json --webHost KestrelSockets $trend $jsonJobs" 
