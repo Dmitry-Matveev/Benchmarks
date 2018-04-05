@@ -7,9 +7,6 @@
       "PipelineDepth": 16
     },
 
-    "ScriptName": "pipeline",
-    "PipelineDepth": 16,
-
     "PresetHeaders": "Plaintext",
     "Source": {
       "Repository": "https://github.com/aspnet/benchmarks.git",
@@ -25,13 +22,14 @@
     "ClientProperties": {
       "ScriptName": "",
       "PipelineDepth": 0
-    },
-    "ScriptName": "",
-    "PipelineDepth": 0
+    }
   },
   "CopyToAsync": {
     "Path": "/copytoasync",
-    "ScriptName": "post"
+    "ClientProperties": {
+      "ScriptName": "post",
+      "PipelineDepth": 16
+    }
   },
   "MvcPlaintext": {
     "Path": "/mvc/plaintext"
