@@ -8,6 +8,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
 using Benchmarks.ClientJob;
@@ -1089,7 +1090,7 @@ namespace BenchmarksDriver
                                 {
                                     Log("Writing results to SQL...");
 
-                                    await serializer.WriteJobResultsToSqlAsync(
+                                    var sqlTask= serializer.WriteJobResultsToSqlAsync(
                                         serverJob: serverJob,
                                         clientJob: clientJob,
                                         connectionString: sqlConnectionString,
@@ -1099,6 +1100,40 @@ namespace BenchmarksDriver
                                         description: description,
                                         statistics: average,
                                         longRunning: span > TimeSpan.Zero);
+
+                                    var timeout = Task.Delay((int)TimeSpan.FromMinutes(2).TotalMilliseconds);
+
+                                    while (!sqlTask.IsCompleted && !timeout.IsCompleted)
+                                    {
+                                        await Task.Delay(1000);
+
+                                        // Keep the server alive while we write to SQL as it could take a long time or fail
+                                        // Also don't fail the long running jobs if SQL did not succeed
+                                        LogVerbose($"GET {serverJobUri}...");
+                                        response = await _httpClient.GetAsync(serverJobUri);
+                                        responseContent = await response.Content.ReadAsStringAsync();
+
+                                        LogVerbose($"{(int)response.StatusCode} {response.StatusCode} {responseContent}");
+                                    } 
+
+                                    if (sqlTask.IsCompleted)
+                                    {
+                                        // Task completed within timeout.
+                                        // Consider that the task may have faulted or been canceled.
+                                        // We re-await the task so that any exceptions/cancellation is rethrown.
+                                        try
+                                        {
+                                            await sqlTask;
+                                        }
+                                        catch(Exception e)
+                                        {
+                                            Log("An error occured while executing the query: " + e.Message);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        Log("SQL timeout, skipping");
+                                    }
                                 }
                             }
                         }
