@@ -4,7 +4,7 @@
     <TargetFramework>$(BenchmarksTargetFramework)</TargetFramework>
     <OutputType>Exe</OutputType>
     <NETCoreAppImplicitPackageVersion>$(BenchmarksNETCoreAppImplicitPackageVersion)</NETCoreAppImplicitPackageVersion>
-    <RuntimeFrameworkVersion>1.2.3.4</RuntimeFrameworkVersion>
+    <RuntimeFrameworkVersion>2.1.0-preview3-26331-01</RuntimeFrameworkVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="$(BenchmarksAspNetCoreVersion.StartsWith('2.1'))">
