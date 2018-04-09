@@ -27,6 +27,8 @@ namespace Benchmarks
 
         public static void Main(string[] args)
         {
+            throw new Exception("CRASH!!");
+
             Args = args;
 
             Console.WriteLine();
