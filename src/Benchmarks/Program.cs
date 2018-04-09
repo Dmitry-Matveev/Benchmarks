@@ -27,7 +27,7 @@ namespace Benchmarks
 
         public static void Main(string[] args)
         {
-            blah blah new Exception("CRASH!!");
+            throw new Exception("CRASH!!");
 
             Args = args;
 
