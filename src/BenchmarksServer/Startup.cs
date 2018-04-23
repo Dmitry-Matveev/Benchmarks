@@ -127,7 +127,7 @@ namespace BenchmarkServer
             _dotnetInstallPath = Path.Combine(_rootTempDir, Path.GetRandomFileName());
 
             // Ensure the folder already exists
-            Directory.CreateDirectory(Path.GetDirectoryName(_dotnetInstallPath));
+            Directory.CreateDirectory(_dotnetInstallPath);
 
             var _dotnetInstallUrl = OperatingSystem == OperatingSystem.Windows
                 ? _dotnetInstallPs1Url
@@ -137,7 +137,7 @@ namespace BenchmarkServer
             var dotnetInstallFilename = Path.Combine(_dotnetInstallPath, Path.GetFileName(_dotnetInstallUrl));
             
             Log.WriteLine($"Downloading dotnet-install to '{dotnetInstallFilename}'");
-            DownloadFileAsync(_dotnetInstallPs1Url, dotnetInstallFilename, maxRetries: 5, timeout: 60).GetAwaiter().GetResult();
+            DownloadFileAsync(_dotnetInstallUrl, dotnetInstallFilename, maxRetries: 5, timeout: 60).GetAwaiter().GetResult();
 
             Action shutdown = () =>
             {
