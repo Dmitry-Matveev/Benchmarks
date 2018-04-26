@@ -176,6 +176,8 @@ namespace BenchmarkClient
                     {
                         return string.Equals(clientJob.SpanId, job.SpanId);
                     });
+
+                    Log($"Picked a new job that might be null: {job}");
                 }
                 // job will be null if there aren't any more jobs with the same spanId.
                 if (job == null)
@@ -183,6 +185,8 @@ namespace BenchmarkClient
                     // Get another job for the new worker we are going to create
                     job = allJobs.FirstOrDefault();
 
+                    Log($"Previous job was null. New Job: {job}");
+                    Log($"Job Span Id: {job?.SpanId ?? "New job is null"}");
                     // No more jobs with the same span id exist so we can clear
                     // out the worker to signal to the worker factory to create
                     // a new one.
