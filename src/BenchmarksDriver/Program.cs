@@ -550,7 +550,7 @@ namespace BenchmarksDriver
                 }
                 if (span > TimeSpan.Zero)
                 {
-                    _clientJob.SpanId = new Guid().ToString();
+                    _clientJob.SpanId = Guid.NewGuid().ToString();
                 }
 
                 switch (headers)
