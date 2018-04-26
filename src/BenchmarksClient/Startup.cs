@@ -201,22 +201,21 @@ namespace BenchmarkClient
                     // a new one.
 
                 }
-            }
-
-            if (worker != null)
-            {
-                var now = DateTime.UtcNow;
-
-                // Clean the job in case the driver is not running
-                if (now - worker.GetWhenLastJobFinished() > TimeSpan.FromSeconds(10))
+                if (worker != null)
                 {
-                    Log("We've waited long enough. Let's get rid of the worker");
-                    await worker.DisposeAsync();
-                    worker = null;
-                }
-                else
-                {
-                    Log("Waiting for a new job to enter the queue");
+                    var now = DateTime.UtcNow;
+
+                    // Clean the job in case the driver is not running
+                    if (now - worker.GetWhenLastJobFinished() > TimeSpan.FromSeconds(10))
+                    {
+                        Log("We've waited long enough. Let's get rid of the worker");
+                        await worker.DisposeAsync();
+                        worker = null;
+                    }
+                    else
+                    {
+                        Log("Waiting for a new job to enter the queue");
+                    }
                 }
             }
         }
