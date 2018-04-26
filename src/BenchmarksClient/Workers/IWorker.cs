@@ -14,5 +14,6 @@ namespace BenchmarksClient.Workers
         Task StartJobAsync(ClientJob job);
         Task StopJobAsync();
         Task DisposeAsync();
+        DateTime GetWhenLastJobFinished();
     }
 }

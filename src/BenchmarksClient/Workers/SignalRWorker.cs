@@ -34,6 +34,7 @@ namespace BenchmarksClient.Workers
         private string _scenario;
         private TimeSpan _sendDelay = TimeSpan.FromMinutes(10);
         private List<(double sum, int count)> _latencyAverage;
+        private DateTime _whenLastJobCompleted;
 
         private void InitializeJob()
         {
@@ -101,6 +102,7 @@ namespace BenchmarksClient.Workers
         public async Task StartJobAsync(ClientJob job)
         {
             _job = job;
+            Log($"Starting Job");
             InitializeJob();
             // start connections
             var tasks = new List<Task>(_connections.Count);
@@ -172,6 +174,7 @@ namespace BenchmarksClient.Workers
 
         public async Task StopJobAsync()
         {
+            Log($"Stoping Job: {_job.SpanId}");
             if (_stopped || !await _lock.WaitAsync(0))
             {
                 // someone else is stopping, we only need to do it once
@@ -188,6 +191,7 @@ namespace BenchmarksClient.Workers
             {
                 _lock.Release();
                 _job.State = ClientJobState.Completed;
+                _whenLastJobCompleted = DateTime.UtcNow;
             }
         }
 
@@ -436,6 +440,11 @@ namespace BenchmarksClient.Workers
         {
             var time = DateTime.Now.ToString("hh:mm:ss.fff");
             Console.WriteLine($"[{time}] {message}");
+        }
+
+        public DateTime GetWhenLastJobFinished()
+        {
+            return _whenLastJobCompleted;
         }
     }
 }

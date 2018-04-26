@@ -67,5 +67,10 @@ namespace BenchmarksClient.Workers
             var time = DateTime.Now.ToString("hh:mm:ss.fff");
             Console.WriteLine($"[{time}] {message}");
         }
+
+        public DateTime GetWhenLastJobFinished()
+        {
+            return DateTime.UtcNow;
+        }
     }
 }

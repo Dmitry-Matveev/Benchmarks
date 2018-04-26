@@ -390,5 +390,10 @@ namespace BenchmarksClient.Workers
             _process = null;
             return Task.CompletedTask;
         }
+
+        public DateTime GetWhenLastJobFinished()
+        {
+            return DateTime.UtcNow;
+        }
     }
 }
