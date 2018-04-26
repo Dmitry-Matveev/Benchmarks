@@ -108,6 +108,7 @@ namespace BenchmarkClient
             {
                 if (job != null)
                 {
+                    Log($"Current Job state: {job.State}");
                     if (job.State == ClientJobState.Waiting)
                     {
                         Log($"Starting '{job.Client}' worker");
@@ -167,9 +168,11 @@ namespace BenchmarkClient
                         }
                     }
                 }
-                await Task.Delay(100);
+                await Task.Delay(500);
 
                 allJobs = _jobs.GetAll();
+                Log($"All jobs: {allJobs}");
+                Log($"All jobs: {allJobs}");
                 if (job != null)
                 {
                     job = allJobs.FirstOrDefault(clientJob =>
@@ -184,18 +187,24 @@ namespace BenchmarkClient
                 {
                     // Get another job for the new worker we are going to create
                     job = allJobs.FirstOrDefault();
-
-                    Log($"Previous job was null. New Job: {job}");
-                    Log($"Job Span Id: {job?.SpanId ?? "New job is null"}");
+                    if (job == null)
+                    { 
+                        Log($"Previous job was null. New Job: {job}");
+                    }
+                    else
+                    {
+                        Log("No Jobs in the queue");
+                    }
                     // No more jobs with the same span id exist so we can clear
                     // out the worker to signal to the worker factory to create
                     // a new one.
-                    if (worker != null)
-                    {
-                        await worker.DisposeAsync();
-                        worker = null;
-                    }
+
                 }
+            }
+            if (worker != null)
+            {
+                await worker.DisposeAsync();
+                worker = null;
             }
         }
 
