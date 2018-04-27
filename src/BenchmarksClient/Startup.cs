@@ -185,7 +185,7 @@ namespace BenchmarkClient
                     });
 
                     Log($"Picked a new job that might be null: {job}");
-                    
+
                     // job will be null if there aren't any more jobs with the same spanId.
                     if (job == null)
                     {
@@ -208,6 +208,7 @@ namespace BenchmarkClient
                                 Log("Waiting for a new job to enter the queue");
                             }
                         }
+                    }
                 }
             }
         }
