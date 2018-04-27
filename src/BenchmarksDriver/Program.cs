@@ -212,6 +212,7 @@ namespace BenchmarksDriver
 
                 var sqlConnectionString = sqlConnectionStringOption.Value();
                 TimeSpan span = TimeSpan.Zero;
+                var spanId = Guid.NewGuid().ToString("n");
 
                 if (!Enum.TryParse(schemeValue, ignoreCase: true, result: out Scheme scheme) ||
                     !Enum.TryParse(webHostValue, ignoreCase: true, result: out WebHost webHost) ||
@@ -550,7 +551,7 @@ namespace BenchmarksDriver
                 }
                 if (span > TimeSpan.Zero)
                 {
-                    _clientJob.SpanId = Guid.NewGuid().ToString();
+                    _clientJob.SpanId = spanId;
                 }
 
                 switch (headers)

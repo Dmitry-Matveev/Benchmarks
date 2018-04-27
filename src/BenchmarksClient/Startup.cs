@@ -100,6 +100,7 @@ namespace BenchmarkClient
         private static async Task ProcessJobs(CancellationToken cancellationToken)
         {
             IWorker worker = null;
+            DateTime whenLastJobCompleted = DateTime.UtcNow;
             var allJobs = _jobs.GetAll();
             // Dequeue the first job. We will only pass jobs that have
             // the same SpanId to the current worker.
@@ -160,7 +161,9 @@ namespace BenchmarkClient
                             if (worker != null)
                             {
                                 await worker.StopJobAsync();
-                                // Make the time since job finished a local variable and reset it here.
+
+                                // Reset the last job completed indicator. 
+                                whenLastJobCompleted = DateTime.UtcNow;
                             }
                         }
                         finally
@@ -169,10 +172,9 @@ namespace BenchmarkClient
                         }
                     }
                 }
-                await Task.Delay(500);
+                await Task.Delay(100);
 
                 allJobs = _jobs.GetAll();
-                Log($"All jobs: {allJobs}");
                 Log($"All jobs: {allJobs}");
                 if (job != null)
                 {
@@ -206,7 +208,7 @@ namespace BenchmarkClient
                     var now = DateTime.UtcNow;
 
                     // Clean the job in case the driver is not running
-                    if (now - worker.GetWhenLastJobFinished() > TimeSpan.FromSeconds(10))
+                    if (now - whenLastJobCompleted> TimeSpan.FromSeconds(10))
                     {
                         Log("We've waited long enough. Let's get rid of the worker");
                         await worker.DisposeAsync();
