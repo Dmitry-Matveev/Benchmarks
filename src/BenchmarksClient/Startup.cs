@@ -101,14 +101,22 @@ namespace BenchmarkClient
         {
             IWorker worker = null;
             DateTime whenLastJobCompleted = DateTime.MinValue;
-            var allJobs = _jobs.GetAll();
-            // Dequeue the first job. We will only pass jobs that have
-            // the same SpanId to the current worker.
-            var job = allJobs.FirstOrDefault();
+            ClientJob job = null;
             while (!cancellationToken.IsCancellationRequested)
             {
+                var allJobs = _jobs.GetAll();
+                // Dequeue the first job. We will only pass jobs that have
+                // the same SpanId to the current worker.
+                job = allJobs.FirstOrDefault(newJob =>
+                {
+                    // If the job is null then we don't have a span id to match against. 
+                    // Otherwise we want to pick jobs with the same span id.
+                    return job == null || string.Equals(newJob.SpanId, job.SpanId);
+                });
+
                 if (job != null)
                 {
+                    var currentSpanId = job.SpanId;
                     Log($"Current Job state: {job.State}");
                     if (job.State == ClientJobState.Waiting)
                     {
@@ -180,14 +188,7 @@ namespace BenchmarkClient
                 // job will be null if there aren't any more jobs with the same spanId.
                 if (job == null)
                 {
-
-                    allJobs = _jobs.GetAll();
-
-                    job = allJobs.FirstOrDefault(clientJob =>
-                    {
-                        return string.Equals(clientJob.SpanId, job.SpanId);
-                    });
-                    // No more jobs with the same span id exist so we check if we can
+                    // Currently no jobs with the same span id exist so we check if we can
                     // clearn out the worker to signal to the worker factory to create
                     // a new one.
                     if (worker != null)
@@ -195,7 +196,7 @@ namespace BenchmarkClient
                         var now = DateTime.UtcNow;
 
                         // There is 10 seconds for a new job with the same span id
-                        if (now - whenLastJobCompleted > TimeSpan.FromSeconds(10))
+                        if (whenLastJobCompleted != DateTime.MinValue &&  now - whenLastJobCompleted > TimeSpan.FromSeconds(10))
                         {
                             Log("We've waited long enough. Let's get rid of the worker");
                             await worker.DisposeAsync();
