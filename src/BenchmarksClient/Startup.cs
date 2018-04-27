@@ -165,48 +165,45 @@ namespace BenchmarkClient
 
                                 // Reset the last job completed indicator. 
                                 whenLastJobCompleted = DateTime.UtcNow;
+
                             }
                         }
                         finally
                         {
                             _jobs.Remove(job.Id);
+                            job = null;
                         }
                     }
                 }
                 await Task.Delay(100);
 
-                allJobs = _jobs.GetAll();
-                Log($"All jobs: {allJobs}");
-                if (job != null)
+                // job will be null if there aren't any more jobs with the same spanId.
+                if (job == null)
                 {
+
+                    allJobs = _jobs.GetAll();
+
                     job = allJobs.FirstOrDefault(clientJob =>
                     {
                         return string.Equals(clientJob.SpanId, job.SpanId);
                     });
-
-                    Log($"Picked a new job that might be null: {job}");
-
-                    // job will be null if there aren't any more jobs with the same spanId.
-                    if (job == null)
+                    // No more jobs with the same span id exist so we check if we can
+                    // clearn out the worker to signal to the worker factory to create
+                    // a new one.
+                    if (worker != null)
                     {
-                        // No more jobs with the same span id exist so we check if we can
-                        // clearn out the worker to signal to the worker factory to create
-                        // a new one.
-                        if (worker != null)
-                        {
-                            var now = DateTime.UtcNow;
+                        var now = DateTime.UtcNow;
 
-                            // Clean the job in case the driver is not running
-                            if (now - whenLastJobCompleted > TimeSpan.FromSeconds(10))
-                            {
-                                Log("We've waited long enough. Let's get rid of the worker");
-                                await worker.DisposeAsync();
-                                worker = null;
-                            }
-                            else
-                            {
-                                Log("Waiting for a new job to enter the queue");
-                            }
+                        // There is 10 seconds for a new job with the same span id
+                        if (now - whenLastJobCompleted > TimeSpan.FromSeconds(10))
+                        {
+                            Log("We've waited long enough. Let's get rid of the worker");
+                            await worker.DisposeAsync();
+                            worker = null;
+                        }
+                        else
+                        {
+                            Log("Waiting for a new job to enter the queue");
                         }
                     }
                 }
