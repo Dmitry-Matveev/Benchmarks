@@ -100,7 +100,7 @@ namespace BenchmarkClient
         private static async Task ProcessJobs(CancellationToken cancellationToken)
         {
             IWorker worker = null;
-            DateTime whenLastJobCompleted = DateTime.UtcNow;
+            DateTime whenLastJobCompleted = DateTime.MinValue;
             var allJobs = _jobs.GetAll();
             // Dequeue the first job. We will only pass jobs that have
             // the same SpanId to the current worker.
@@ -127,6 +127,7 @@ namespace BenchmarkClient
                             {
                                 Log($"Error while creating the worker");
                                 job.State = ClientJobState.Deleting;
+                                whenLastJobCompleted = DateTime.UtcNow;
                             }
                             else
                             {
@@ -184,40 +185,29 @@ namespace BenchmarkClient
                     });
 
                     Log($"Picked a new job that might be null: {job}");
-                }
-                // job will be null if there aren't any more jobs with the same spanId.
-                if (job == null)
-                {
-                    // Get another job for the new worker we are going to create
-                    job = allJobs.FirstOrDefault();
+                    
+                    // job will be null if there aren't any more jobs with the same spanId.
                     if (job == null)
-                    { 
-                        Log($"Previous job was null. New Job: {job}");
-                    }
-                    else
                     {
-                        Log("No Jobs in the queue");
-                    }
-                    // No more jobs with the same span id exist so we can clear
-                    // out the worker to signal to the worker factory to create
-                    // a new one.
+                        // No more jobs with the same span id exist so we check if we can
+                        // clearn out the worker to signal to the worker factory to create
+                        // a new one.
+                        if (worker != null)
+                        {
+                            var now = DateTime.UtcNow;
 
-                }
-                if (worker != null)
-                {
-                    var now = DateTime.UtcNow;
-
-                    // Clean the job in case the driver is not running
-                    if (now - whenLastJobCompleted> TimeSpan.FromSeconds(10))
-                    {
-                        Log("We've waited long enough. Let's get rid of the worker");
-                        await worker.DisposeAsync();
-                        worker = null;
-                    }
-                    else
-                    {
-                        Log("Waiting for a new job to enter the queue");
-                    }
+                            // Clean the job in case the driver is not running
+                            if (now - whenLastJobCompleted > TimeSpan.FromSeconds(10))
+                            {
+                                Log("We've waited long enough. Let's get rid of the worker");
+                                await worker.DisposeAsync();
+                                worker = null;
+                            }
+                            else
+                            {
+                                Log("Waiting for a new job to enter the queue");
+                            }
+                        }
                 }
             }
         }
