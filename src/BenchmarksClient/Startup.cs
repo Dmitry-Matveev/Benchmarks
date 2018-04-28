@@ -102,6 +102,7 @@ namespace BenchmarkClient
             IWorker worker = null;
             DateTime whenLastJobCompleted = DateTime.MinValue;
             ClientJob job = null;
+            var waitForMoreJobs = false;
             while (!cancellationToken.IsCancellationRequested)
             {
                 var allJobs = _jobs.GetAll();
@@ -116,7 +117,12 @@ namespace BenchmarkClient
 
                 if (job != null)
                 {
-                    var currentSpanId = job.SpanId;
+                    // A spanId means that a span is defined and we might run
+                    // multiple jobs.
+                    if (job.SpanId != null)
+                    {
+                        waitForMoreJobs = true;
+                    }
                     Log($"Current Job state: {job.State}");
                     if (job.State == ClientJobState.Waiting)
                     {
@@ -195,8 +201,11 @@ namespace BenchmarkClient
                     {
                         var now = DateTime.UtcNow;
 
-                        // There is 10 seconds for a new job with the same span id
-                        if (whenLastJobCompleted != DateTime.MinValue &&  now - whenLastJobCompleted > TimeSpan.FromSeconds(10))
+                        // Disposing the worker conditions
+                        // 1. A span isn't defined so there won't be any more jobs for this worker
+                        // 2. We check that whenLastJob completed is something other that it's default value 
+                        //    and 10 seconds have passed since th elast job was completed.
+                        if (!waitForMoreJobs || (whenLastJobCompleted != DateTime.MinValue &&  now - whenLastJobCompleted > TimeSpan.FromSeconds(10)))
                         {
                             Log("We've waited long enough. Let's get rid of the worker");
                             await worker.DisposeAsync();
