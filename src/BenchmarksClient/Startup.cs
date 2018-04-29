@@ -119,8 +119,9 @@ namespace BenchmarkClient
                 {
                     // A spanId means that a span is defined and we might run
                     // multiple jobs.
-                    if (job.SpanId != null)
+                    if (!string.IsNullOrEmpty(job.SpanId))
                     {
+                        Log($"We have a span: {job.SpanId}");
                         waitForMoreJobs = true;
                     }
                     Log($"Current Job state: {job.State}");
