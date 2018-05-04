@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Benchmarks.Configuration;
@@ -165,9 +166,7 @@ namespace Benchmarks.Data
             }
 
             result.Add(new Fortune { Message = "Additional fortune added at request time." });
-            result.Sort();
-
-            return result;
+            return result.OrderBy(f => f.Message);
         }
 
         public IEnumerable<Fortune> LoadFortunesRowsSync()
