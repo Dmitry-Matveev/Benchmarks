@@ -166,7 +166,7 @@ namespace Benchmarks.Data
             }
 
             result.Add(new Fortune { Message = "Additional fortune added at request time." });
-            return result.OrderBy(f => f.Message);
+            return result.OrderBy(f => f.Message, StringComparer.Ordinal);
         }
 
         public IEnumerable<Fortune> LoadFortunesRowsSync()
