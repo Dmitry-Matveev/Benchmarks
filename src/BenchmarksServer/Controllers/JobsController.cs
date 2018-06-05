@@ -69,25 +69,6 @@ namespace BenchmarkServer.Controllers
             }   
         }
 
-        [HttpPost]
-        public IActionResult Create([FromBody] ServerJob job)
-        {
-            lock (_jobs)
-            {
-                if (job == null || job.Id != 0 || job.State != ServerState.Initializing)
-                {
-                    return BadRequest();
-                }
-
-                job.Hardware = Startup.Hardware;
-                job.HardwareVersion = Startup.HardwareVersion;
-                job.OperatingSystem = Startup.OperatingSystem;
-                job = _jobs.Add(job);
-
-                Response.Headers["Location"] = $"/jobs/{job.Id}";
-                return new StatusCodeResult((int)HttpStatusCode.Accepted);
-            }
-        }
 
         [HttpDelete("{id}")]
         public IActionResult Delete(int id)
