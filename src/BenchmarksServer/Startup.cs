@@ -67,115 +67,101 @@ namespace BenchmarkServer
 
         static Startup()
         {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            {
-                OperatingSystem = OperatingSystem.Linux;
-            }
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                OperatingSystem = OperatingSystem.Windows;
-            }
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            {
-                OperatingSystem = OperatingSystem.OSX;
-            }
-            else
-            {
-                throw new InvalidOperationException($"Invalid OSPlatform: {RuntimeInformation.OSDescription}");
-            }
+            //if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            //{
+            //    OperatingSystem = OperatingSystem.Linux;
+            //}
+            //else if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            //{
+            //    OperatingSystem = OperatingSystem.Windows;
+            //}
+            //else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            //{
+            //    OperatingSystem = OperatingSystem.OSX;
+            //}
+            //else
+            //{
+            //    throw new InvalidOperationException($"Invalid OSPlatform: {RuntimeInformation.OSDescription}");
+            //}
 
-            // Use the same root temporary folder so we can clean it on restarts
-            _rootTempDir = Path.Combine(Path.GetTempPath(), "BenchmarksServer");
-            Directory.CreateDirectory(_rootTempDir);
-            Log.WriteLine($"Cleaning temporary job files '{_rootTempDir}' ...");
-            foreach (var tempFolder in Directory.GetDirectories(_rootTempDir))
-            {
-                try
-                {
-                    Log.WriteLine($"Attempting to deleting '{tempFolder}'");
-                    File.Delete(tempFolder);
-                }
-                catch(Exception e)
-                {
-                    Log.WriteLine("Failed with error: " + e.Message);
-                }
-            }
+            //// Use the same root temporary folder so we can clean it on restarts
+            //_rootTempDir = Path.Combine(Path.GetTempPath(), "BenchmarksServer");
+            //Directory.CreateDirectory(_rootTempDir);
+            //Log.WriteLine($"Cleaning temporary job files '{_rootTempDir}' ...");
+            //foreach (var tempFolder in Directory.GetDirectories(_rootTempDir))
+            //{
+            //    try
+            //    {
+            //        Log.WriteLine($"Attempting to deleting '{tempFolder}'");
+            //        File.Delete(tempFolder);
+            //    }
+            //    catch(Exception e)
+            //    {
+            //        Log.WriteLine("Failed with error: " + e.Message);
+            //    }
+            //}
 
-            // Configuring the http client to trust the self-signed certificate
-            _httpClientHandler = new HttpClientHandler();
-            _httpClientHandler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
-            _httpClient = new HttpClient(_httpClientHandler);
+            //// Configuring the http client to trust the self-signed certificate
+            //_httpClientHandler = new HttpClientHandler();
+            //_httpClientHandler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+            //_httpClient = new HttpClient(_httpClientHandler);
 
-            // Download PerfView
-            if (OperatingSystem == OperatingSystem.Windows)
-            {
-                _perfviewPath = Path.Combine(Path.GetTempPath(), PerfViewVersion, Path.GetFileName(_perfviewUrl));
+            //// Download PerfView
+            //if (OperatingSystem == OperatingSystem.Windows)
+            //{
+            //    _perfviewPath = Path.Combine(Path.GetTempPath(), PerfViewVersion, Path.GetFileName(_perfviewUrl));
 
-                // Ensure the folder already exists
-                Directory.CreateDirectory(Path.GetDirectoryName(_perfviewPath));
+            //    // Ensure the folder already exists
+            //    Directory.CreateDirectory(Path.GetDirectoryName(_perfviewPath));
 
-                if (!File.Exists(_perfviewPath))
-                {
-                    Log.WriteLine($"Downloading PerfView to '{_perfviewPath}'");
-                    DownloadFileAsync(_perfviewUrl, _perfviewPath, maxRetries: 5, timeout: 60).GetAwaiter().GetResult();
-                }
-                else
-                {
-                    Log.WriteLine($"Found PerfView locally at '{_perfviewPath}'");
-                }
-            }
+            //    if (!File.Exists(_perfviewPath))
+            //    {
+            //        Log.WriteLine($"Downloading PerfView to '{_perfviewPath}'");
+            //        DownloadFileAsync(_perfviewUrl, _perfviewPath, maxRetries: 5, timeout: 60).GetAwaiter().GetResult();
+            //    }
+            //    else
+            //    {
+            //        Log.WriteLine($"Found PerfView locally at '{_perfviewPath}'");
+            //    }
+            //}
 
-            // Download dotnet-install at startup, once.
-            _dotnetInstallPath = Path.Combine(_rootTempDir, Path.GetRandomFileName());
+            //// Download dotnet-install at startup, once.
+            //_dotnetInstallPath = Path.Combine(_rootTempDir, Path.GetRandomFileName());
 
-            // Ensure the folder already exists
-            Directory.CreateDirectory(_dotnetInstallPath);
+            //// Ensure the folder already exists
+            //Directory.CreateDirectory(_dotnetInstallPath);
 
-            var _dotnetInstallUrl = OperatingSystem == OperatingSystem.Windows
-                ? _dotnetInstallPs1Url
-                : _dotnetInstallShUrl
-                ;
+            //var _dotnetInstallUrl = OperatingSystem == OperatingSystem.Windows
+            //    ? _dotnetInstallPs1Url
+            //    : _dotnetInstallShUrl
+            //    ;
 
-            var dotnetInstallFilename = Path.Combine(_dotnetInstallPath, Path.GetFileName(_dotnetInstallUrl));
+            //var dotnetInstallFilename = Path.Combine(_dotnetInstallPath, Path.GetFileName(_dotnetInstallUrl));
             
-            Log.WriteLine($"Downloading dotnet-install to '{dotnetInstallFilename}'");
-            DownloadFileAsync(_dotnetInstallUrl, dotnetInstallFilename, maxRetries: 5, timeout: 60).GetAwaiter().GetResult();
+            //Log.WriteLine($"Downloading dotnet-install to '{dotnetInstallFilename}'");
+            //DownloadFileAsync(_dotnetInstallUrl, dotnetInstallFilename, maxRetries: 5, timeout: 60).GetAwaiter().GetResult();
 
-            Action shutdown = () =>
-            {
-                if (_cleanup && Directory.Exists(_rootTempDir))
-                {
-                    DeleteDir(_rootTempDir);
-                }
-            };
+            //Action shutdown = () =>
+            //{
+            //    if (_cleanup && Directory.Exists(_rootTempDir))
+            //    {
+            //        DeleteDir(_rootTempDir);
+            //    }
+            //};
 
-            // SIGTERM
-            AssemblyLoadContext.GetLoadContext(typeof(Startup).GetTypeInfo().Assembly).Unloading +=
-                context => shutdown();
+        }
 
-            // SIGINT
-            Console.CancelKeyPress +=
-                (sender, eventArgs) => shutdown();
+        public static void Main(string[] args)
+        {
+
         }
 
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddMvc();
-
-            services.AddSingleton(_jobs);
         }
 
         public void Configure(IApplicationBuilder app)
         {
-            app.UseMvc();
-
-            // Register a default startup page to ensure the application is up
-            app.Map("", (b) => b.Run(
-                (context) =>
-            {
-                return context.Response.WriteAsync("OK!");
-            }));
-
             app.Map("/sigint", (b) =>
             {
                 b.Run(async context =>
@@ -262,102 +248,6 @@ namespace BenchmarkServer
                 }
                 );
             });
-        }
-
-        public static int Main(string[] args)
-        {
-            // Prevent unhandled exceptions in the benchmarked apps from displaying a popup that would block 
-            // the main process on Windows
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                SetErrorMode(ErrorModes.SEM_NONE);
-            }
-
-            var app = new CommandLineApplication()
-            {
-                Name = "BenchmarksServer",
-                FullName = "ASP.NET Benchmark Server",
-                Description = "REST APIs to run ASP.NET benchmark server",
-                OptionsComparison = StringComparison.OrdinalIgnoreCase
-            };
-
-            app.HelpOption("-?|-h|--help");
-
-            var urlOption = app.Option("-u|--url", $"URL for Rest APIs.  Default is '{_defaultUrl}'.",
-                CommandOptionType.SingleValue);
-            var hostnameOption = app.Option("-n|--hostname", $"Hostname for benchmark server.  Default is '{_defaultHostname}'.",
-                CommandOptionType.SingleValue);
-            var hardwareOption = app.Option("--hardware", "Hardware (Cloud or Physical).  Required.",
-                CommandOptionType.SingleValue);
-            var hardwareVersionOption = app.Option("--hardware-version", "Hardware version (e.g, D3V2, Z420, ...).  Required.",
-                CommandOptionType.SingleValue);
-            var databaseOption = app.Option("-d|--database", "Database (PostgreSQL, SqlServer, MySql or MongoDb).",
-                CommandOptionType.SingleValue);
-            var noCleanupOption = app.Option("--no-cleanup",
-                "Don't kill processes or delete temp directories.", CommandOptionType.NoValue);
-            var postgresqlConnectionStringOption = app.Option("--postgresql",
-                "The connection string for PostgreSql.", CommandOptionType.SingleValue);
-            var mysqlConnectionStringOption = app.Option("--mysql",
-                "The connection string for MySql.", CommandOptionType.SingleValue);
-            var mssqlConnectionStringOption = app.Option("--mssql",
-                "The connection string for SqlServer.", CommandOptionType.SingleValue);
-            var mongoDbConnectionStringOption = app.Option("--mongodb",
-                "The connection string for MongoDb.", CommandOptionType.SingleValue);
-
-            app.OnExecute(() =>
-            {
-                if (noCleanupOption.HasValue())
-                {
-                    _cleanup = false;
-                }
-
-                if (postgresqlConnectionStringOption.HasValue())
-                {
-                    ConnectionStrings[Database.PostgreSql] = postgresqlConnectionStringOption.Value();
-                }
-                if (mysqlConnectionStringOption.HasValue())
-                {
-                    ConnectionStrings[Database.MySql] = mysqlConnectionStringOption.Value();
-                }
-                if (mssqlConnectionStringOption.HasValue())
-                {
-                    ConnectionStrings[Database.SqlServer] = mssqlConnectionStringOption.Value();
-                }
-                if (mongoDbConnectionStringOption.HasValue())
-                {
-                    ConnectionStrings[Database.MongoDb] = mongoDbConnectionStringOption.Value();
-                }
-                if (hardwareVersionOption.HasValue() && !string.IsNullOrWhiteSpace(hardwareVersionOption.Value()))
-                {
-                    HardwareVersion = hardwareVersionOption.Value();
-                }
-                else
-                {
-                    Console.WriteLine("Option --hardware-version is required.");
-                    return 3;
-                }
-                if (Enum.TryParse(hardwareOption.Value(), ignoreCase: true, result: out Hardware hardware))
-                {
-                    Hardware = hardware;
-                }
-                else
-                {
-                    Console.WriteLine($"Option --{hardwareOption.LongName} <TYPE> is required. Available types:");
-                    foreach (Hardware type in Enum.GetValues(typeof(Hardware)))
-                    {
-                        Console.WriteLine($"  {type}");
-                    }
-                    return 2;
-                }
-
-                var url = urlOption.HasValue() ? urlOption.Value() : _defaultUrl;
-                var hostname = hostnameOption.HasValue() ? hostnameOption.Value() : _defaultHostname;
-
-
-                return Run(url, hostname).Result;
-            });
-
-            return app.Execute(args);
         }
 
         private static async Task<int> Run(string url, string hostname)
