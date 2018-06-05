@@ -120,9 +120,9 @@ namespace BenchmarkServer
 
         }
 
-        public static void Main(string[] args)
+        public static int Main(string[] args)
         {
-
+            return Run().Result;
         }
 
         public void ConfigureServices(IServiceCollection services)
@@ -219,6 +219,23 @@ namespace BenchmarkServer
             });
         }
 
+        private static async Task<int> Run()
+        {
+            var host = new WebHostBuilder()
+                    .UseKestrel()
+                    .UseStartup<Startup>()
+                    .UseUrls("http://*:5001")
+                    .ConfigureLogging((hostingContext, logging) =>
+                    {
+                        logging.SetMinimumLevel(LogLevel.Error);
+                        logging.AddConsole();
+                    })
+                    .Build();
+
+            await host.RunAsync();
+
+            return 0;
+        }
         public enum ErrorModes : uint
         {
             SYSTEM_DEFAULT = 0x0,
