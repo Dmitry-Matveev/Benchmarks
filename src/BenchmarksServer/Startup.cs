@@ -170,10 +170,11 @@ namespace BenchmarkServer
             app.UseMvc();
 
             // Register a default startup page to ensure the application is up
-            app.Run((context) =>
+            app.Map("", (b) => b.Run(
+                (context) =>
             {
                 return context.Response.WriteAsync("OK!");
-            });
+            }));
 
             app.Map("/sigint", (b) =>
             {
