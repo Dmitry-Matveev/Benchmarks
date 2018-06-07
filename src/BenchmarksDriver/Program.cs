@@ -1037,6 +1037,11 @@ namespace BenchmarksDriver
                                 }
                             }
 
+                            if (String.IsNullOrEmpty(traceDestination))
+                            {
+                                traceDestination = "trace";
+                            }
+
                             // Collect Trace
                             if (serverJob.Collect)
                             {
@@ -1077,8 +1082,6 @@ namespace BenchmarksDriver
                                     await Task.Delay(1000);
                                 }
 
-                                Log($"Downloading trace...");
-
                                 var traceExtension = serverJob.OperatingSystem == Benchmarks.ServerJob.OperatingSystem.Windows
                                     ? ".etl.zip"
                                     : ".trace.zip" ;
@@ -1086,22 +1089,35 @@ namespace BenchmarksDriver
                                 if (traceDestination == null || !traceDestination.EndsWith(traceExtension, StringComparison.OrdinalIgnoreCase))
                                 {
                                     // If it does not end with a *.etl.zip then we add a DATE.etl.zip to it
-                                    if (String.IsNullOrEmpty(traceDestination))
-                                    {
-                                        traceDestination = "trace";
-                                    }
-
+                                    
                                     var rpsStr = "RPS-" + ((int)((statistics.RequestsPerSecond+500) / 1000)) + "K";
                                     traceDestination = traceDestination + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + "." + rpsStr + traceExtension;
                                 }
 
-                                Log($"Creating trace: {traceDestination}");
+                                Log($"Downloading trace: {traceDestination}");
                                 await File.WriteAllBytesAsync(traceDestination, await _httpClient.GetByteArrayAsync(uri));
                             }
 
+                            // Download netperf file
                             if (enableEventPipe && serverJob.OperatingSystem == Benchmarks.ServerJob.OperatingSystem.Linux)
                             {
-                                downloadFiles.Add(EventPipeOutputFile);
+                                var uri = serverJobUri + "/download?path=" + HttpUtility.UrlEncode(EventPipeOutputFile);
+                                LogVerbose("GET " + uri);
+
+                                try
+                                {
+                                    var rpsStr = "RPS-" + ((int)((statistics.RequestsPerSecond + 500) / 1000)) + "K";
+                                    var netperffilename = traceDestination + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + "." + rpsStr + ".netperf";
+
+                                    Log($"Downloading trace: {traceDestination}");
+                                    await File.WriteAllBytesAsync(netperffilename, await _httpClient.GetByteArrayAsync(uri));
+                                }
+                                catch (Exception e)
+                                {
+                                    Log($"Error while downloading trace file {EventPipeOutputFile}");
+                                    LogVerbose(e.Message);
+                                    continue;
+                                }
                             }
 
                             var shouldComputeResults = results.Any() && iterations == i;
@@ -1316,8 +1332,7 @@ namespace BenchmarksDriver
                                     filename = Path.GetFileNameWithoutExtension(file) + counter++ + Path.GetExtension(file);
                                 }
 
-                                var base64 = await _httpClient.GetStringAsync(uri);
-                                await File.WriteAllBytesAsync(filename, Convert.FromBase64String(base64));
+                                await File.WriteAllBytesAsync(filename, await _httpClient.GetByteArrayAsync(uri));
                             }
                             catch (Exception e)
                             {

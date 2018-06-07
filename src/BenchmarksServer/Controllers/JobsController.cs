@@ -266,7 +266,7 @@ namespace BenchmarkServer.Controllers
                     return NotFound();
                 }
 
-                Log($"Uploading {path} ({new FileInfo(fullPath).Length / 1024} KB)");
+                Log($"Uploading {path} ({new FileInfo(fullPath).Length / 1024 + 1} KB)");
 
                 return File(System.IO.File.OpenRead(fullPath), "application/object");
             }
