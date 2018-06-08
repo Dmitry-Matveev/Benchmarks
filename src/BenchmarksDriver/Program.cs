@@ -1605,19 +1605,24 @@ namespace BenchmarksDriver
 
         private static async Task DownloadBigFile(string uri, Uri serverJobUri, string destinationFileName)
         {
-            var downloadStream = await _httpClient.GetStreamAsync(uri);
-
-            var fileStream = File.Create(destinationFileName);
-            var downloadTask = downloadStream.CopyToAsync(fileStream);
-
-            while (!downloadTask.IsCompleted)
+            using (var downloadStream = await _httpClient.GetStreamAsync(uri))
             {
-                // Ping server job to keep it alive while downloading the file
-                LogVerbose($"GET {serverJobUri}/touch...");
-                var response = await _httpClient.GetAsync(serverJobUri + "/touch");
-            }
+                using (var fileStream = File.Create(destinationFileName))
+                {
+                    var downloadTask = downloadStream.CopyToAsync(fileStream);
 
-            await downloadTask;
+                    while (!downloadTask.IsCompleted)
+                    {
+                        // Ping server job to keep it alive while downloading the file
+                        LogVerbose($"GET {serverJobUri}/touch...");
+                        var response = await _httpClient.GetAsync(serverJobUri + "/touch");
+
+                        await Task.Delay(1000);
+                    }
+
+                    await downloadTask;
+                }
+            }
 
             return;
         }
