@@ -1350,9 +1350,21 @@ namespace BenchmarkServer
                 {
                     foreach (var entry in archive.Entries)
                     {
-                        if (entry.FullName.EndsWith("/tools/crossgen", StringComparison.OrdinalIgnoreCase))
+                        if (entry.FullName.EndsWith("/crossgen", StringComparison.OrdinalIgnoreCase))
                         {
-                            entry.ExtractToFile(Path.Combine(outputFolder, "crossgen"));
+                            var crossgenFolder = job.SelfContained
+                                ? Path.Combine(outputFolder, "crossgen")
+                                : Path.Combine(dotnetDir, "shared", "Microsoft.NETCore.App", runtimeFrameworkVersion)
+                                ;
+
+                            var crossgenFilename = Path.Combine(crossgenFolder, "crossgen");
+
+                            if (!File.Exists(crossgenFilename))
+                            {
+                                entry.ExtractToFile(crossgenFilename);
+                                Log.WriteLine($"Cpied crossgen to {crossgenFolder}");
+                            }
+
                             break;
                         }
                     }
