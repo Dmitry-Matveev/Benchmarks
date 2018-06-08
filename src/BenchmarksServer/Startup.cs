@@ -1362,7 +1362,7 @@ namespace BenchmarkServer
                             if (!File.Exists(crossgenFilename))
                             {
                                 entry.ExtractToFile(crossgenFilename);
-                                Log.WriteLine($"Cpied crossgen to {crossgenFolder}");
+                                Log.WriteLine($"Copied crossgen to {crossgenFolder}");
                             }
 
                             break;
