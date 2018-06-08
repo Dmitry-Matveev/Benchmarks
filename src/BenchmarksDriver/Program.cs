@@ -1088,8 +1088,6 @@ namespace BenchmarksDriver
 
                                 if (traceDestination == null || !traceDestination.EndsWith(traceExtension, StringComparison.OrdinalIgnoreCase))
                                 {
-                                    // If it does not end with a *.etl.zip then we add a DATE.etl.zip to it
-                                    
                                     var rpsStr = "RPS-" + ((int)((statistics.RequestsPerSecond+500) / 1000)) + "K";
                                     traceDestination = traceDestination + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + "." + rpsStr + traceExtension;
                                 }
@@ -1106,11 +1104,14 @@ namespace BenchmarksDriver
 
                                 try
                                 {
-                                    var rpsStr = "RPS-" + ((int)((statistics.RequestsPerSecond + 500) / 1000)) + "K";
-                                    var netperffilename = traceDestination + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + "." + rpsStr + ".netperf";
+                                    if (traceDestination == null || !traceDestination.EndsWith(".netperf", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        var rpsStr = "RPS-" + ((int)((statistics.RequestsPerSecond + 500) / 1000)) + "K";
+                                        traceDestination = traceDestination + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + "." + rpsStr + ".netperf";
+                                    }
 
                                     Log($"Downloading trace: {traceDestination}");
-                                    await File.WriteAllBytesAsync(netperffilename, await _httpClient.GetByteArrayAsync(uri));
+                                    await File.WriteAllBytesAsync(traceDestination, await _httpClient.GetByteArrayAsync(uri));
                                 }
                                 catch (Exception e)
                                 {

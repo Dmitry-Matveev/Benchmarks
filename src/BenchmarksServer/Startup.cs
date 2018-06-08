@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -1327,8 +1328,35 @@ namespace BenchmarkServer
             if (job.Collect && OperatingSystem == OperatingSystem.Linux)
             {
                 Log.WriteLine("Copying crossgen to application folder");
-                var home = Environment.GetEnvironmentVariable("HOME");
-                File.Copy($"{home}/.nuget/packages/runtime.linux-x64.microsoft.netcore.app/{runtimeFrameworkVersion}/tools/crossgen", outputFolder);
+
+                // Downloading corresponding package
+
+                var runtimePath = Path.Combine(_rootTempDir, "RuntimePackages", $"runtime.linux-x64.Microsoft.NETCore.App.{runtimeFrameworkVersion}.nupkg");
+
+                // Ensure the folder already exists
+                Directory.CreateDirectory(Path.GetDirectoryName(runtimePath));
+
+                if (!File.Exists(runtimePath))
+                {
+                    Log.WriteLine($"Downloading runtime package");
+                    await DownloadFileAsync($"https://dotnet.myget.org/F/dotnet-core/api/v2/package/runtime.linux-x64.Microsoft.NETCore.App/{runtimeFrameworkVersion}", runtimePath, maxRetries: 5, timeout: 60);
+                }
+                else
+                {
+                    Log.WriteLine($"Found runtime package at '{runtimePath}'");
+                }
+
+                using (var archive = ZipFile.OpenRead(runtimePath))
+                {
+                    foreach (var entry in archive.Entries)
+                    {
+                        if (entry.FullName.EndsWith("/tools/crossgen", StringComparison.OrdinalIgnoreCase))
+                        {
+                            entry.ExtractToFile(Path.Combine(outputFolder, "crossgen"));
+                            break;
+                        }
+                    }
+                }
             }
 
             // Copy all output attachments
