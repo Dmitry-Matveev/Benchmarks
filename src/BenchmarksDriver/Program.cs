@@ -1086,14 +1086,16 @@ namespace BenchmarksDriver
                                     ? ".etl.zip"
                                     : ".trace.zip" ;
 
-                                if (traceDestination == null || !traceDestination.EndsWith(traceExtension, StringComparison.OrdinalIgnoreCase))
+                                var traceOutputFileName = traceDestination;
+                                if (traceOutputFileName == null || !traceOutputFileName.EndsWith(traceExtension, StringComparison.OrdinalIgnoreCase))
                                 {
                                     var rpsStr = "RPS-" + ((int)((statistics.RequestsPerSecond+500) / 1000)) + "K";
-                                    traceDestination = traceDestination + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + "." + rpsStr + traceExtension;
+                                    traceOutputFileName = traceOutputFileName + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + "." + rpsStr + traceExtension;
                                 }
 
-                                Log($"Downloading trace: {traceDestination}");
-                                await File.WriteAllBytesAsync(traceDestination, await _httpClient.GetByteArrayAsync(uri));
+                                Log($"Downloading trace: {traceOutputFileName}");
+
+                                await DownloadBigFile(uri, serverJobUri, traceOutputFileName);
                             }
 
                             // Download netperf file
@@ -1104,14 +1106,15 @@ namespace BenchmarksDriver
 
                                 try
                                 {
-                                    if (traceDestination == null || !traceDestination.EndsWith(".netperf", StringComparison.OrdinalIgnoreCase))
+                                    var traceOutputFileName = traceDestination;
+                                    if (traceOutputFileName == null || !traceOutputFileName.EndsWith(".netperf", StringComparison.OrdinalIgnoreCase))
                                     {
                                         var rpsStr = "RPS-" + ((int)((statistics.RequestsPerSecond + 500) / 1000)) + "K";
-                                        traceDestination = traceDestination + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + "." + rpsStr + ".netperf";
+                                        traceOutputFileName = traceOutputFileName + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + "." + rpsStr + ".netperf";
                                     }
 
-                                    Log($"Downloading trace: {traceDestination}");
-                                    await File.WriteAllBytesAsync(traceDestination, await _httpClient.GetByteArrayAsync(uri));
+                                    Log($"Downloading trace: {traceOutputFileName}");
+                                    await DownloadBigFile(uri, serverJobUri, traceOutputFileName);
                                 }
                                 catch (Exception e)
                                 {
@@ -1333,7 +1336,7 @@ namespace BenchmarksDriver
                                     filename = Path.GetFileNameWithoutExtension(file) + counter++ + Path.GetExtension(file);
                                 }
 
-                                await File.WriteAllBytesAsync(filename, await _httpClient.GetByteArrayAsync(uri));
+                                await DownloadBigFile(uri, serverJobUri, filename);
                             }
                             catch (Exception e)
                             {
@@ -1598,6 +1601,25 @@ namespace BenchmarksDriver
             }
 
             return clientJob;
+        }
+
+        private static async Task DownloadBigFile(string uri, Uri serverJobUri, string destinationFileName)
+        {
+            var downloadStream = await _httpClient.GetStreamAsync(uri);
+
+            var fileStream = File.Create(destinationFileName);
+            var downloadTask = downloadStream.CopyToAsync(fileStream);
+
+            while (!downloadTask.IsCompleted)
+            {
+                // Ping server job to keep it alive while downloading the file
+                LogVerbose($"GET {serverJobUri}/touch...");
+                var response = await _httpClient.GetAsync(serverJobUri + "/touch");
+            }
+
+            await downloadTask;
+
+            return;
         }
 
         private static async Task InvokeApplicationEndpoint(Uri serverJobUri, string path)
