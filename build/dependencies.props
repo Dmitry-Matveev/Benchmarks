@@ -25,8 +25,8 @@
     <BenchmarksRuntimeFrameworkVersion>$(RuntimeFrameworkVersion)</BenchmarksRuntimeFrameworkVersion>
     <MongoDbVersion>2.6.1</MongoDbVersion>
     <DapperVersion>1.50.5</DapperVersion>
-    <NpgsqlVersion20>3.2.7</NpgsqlVersion20>
-    <NpgsqlVersion21>4.0.0</NpgsqlVersion21>
+    <NpgsqlVersion20>4.0.0</NpgsqlVersion20>
+    <NpgsqlVersion21>3.2.7</NpgsqlVersion21>
     <MySqlConnectorVersion>0.40.4</MySqlConnectorVersion>
     <NpgsqlEntityFrameworkCorePostgreSQLVersion20>2.0.1</NpgsqlEntityFrameworkCorePostgreSQLVersion20>
     <NpgsqlEntityFrameworkCorePostgreSQLVersion21>2.1.0-rc1-ci.298+sha.77296a7ff</NpgsqlEntityFrameworkCorePostgreSQLVersion21>
