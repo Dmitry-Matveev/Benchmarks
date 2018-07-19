@@ -38,7 +38,7 @@ namespace Benchmarks.Middleware
             response.StatusCode = 200;
             response.ContentType = "text/plain";
             response.ContentLength = payloadLength;
-            for (var i = 0; i < 10; i++)
+            for (var i = 0; i < 2; i++)
             {
                 Console.WriteLine("This is a test log to verify how bad perf changes between runs");
             }
