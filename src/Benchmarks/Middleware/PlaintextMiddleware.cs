@@ -38,6 +38,7 @@ namespace Benchmarks.Middleware
             response.StatusCode = 200;
             response.ContentType = "text/plain";
             response.ContentLength = payloadLength;
+            Console.WriteLine("This is a test log to verify how bad perf changes between runs");
             return response.Body.WriteAsync(_helloWorldPayload, 0, payloadLength);
         }
     }
