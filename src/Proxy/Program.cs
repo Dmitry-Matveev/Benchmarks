@@ -64,6 +64,7 @@ namespace Proxy
 
             Console.WriteLine($"Pool HttpClient instances: {pool}");
 
+            _httpClient.BaseAddress = baseUri;
             _httpClientPool.BaseAddress = _httpClient.BaseAddress;
 
             var builder = new WebHostBuilder()
