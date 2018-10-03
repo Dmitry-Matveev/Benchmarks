@@ -40,6 +40,8 @@ namespace Proxy
 
             var baseUri = new Uri(baseUriArg);
 
+            bool.TryParse(config["raw"], out var raw);
+
             // Cache base URI values
             _scheme = baseUri.Scheme;
             _host = new HostString(baseUri.Authority);
@@ -120,11 +122,18 @@ namespace Proxy
                     {
                         var destinationUri = BuildDestinationUri(context);
 
-                        using (var requestMessage = context.CreateProxyHttpRequest(destinationUri))
+                        if (raw)
                         {
-                            using (var responseMessage = await _httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted))
+                            await context.Response.WriteAsync(await _httpClient.GetStringAsync(destinationUri));
+                        }
+                        else
+                        {
+                            using (var requestMessage = context.CreateProxyHttpRequest(destinationUri))
                             {
-                                await context.CopyProxyHttpResponse(responseMessage);
+                                using (var responseMessage = await _httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted))
+                                {
+                                    await context.CopyProxyHttpResponse(responseMessage);
+                                }
                             }
                         }
                     }));
