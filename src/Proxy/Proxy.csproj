@@ -4,16 +4,18 @@
     <TargetFramework>$(BenchmarksTargetFramework)</TargetFramework>
     <TargetFramework Condition="$(BenchmarksTargetFramework) == ''">netcoreapp2.1</TargetFramework>
     <NETCoreAppImplicitPackageVersion>$(BenchmarksNETCoreAppImplicitPackageVersion)</NETCoreAppImplicitPackageVersion>
+    <RuntimeFrameworkVersion>$(MicrosoftNETCoreAppPackageVersion)</RuntimeFrameworkVersion>
     <!-- Prevent the SDK from validating the supported tfm. Can be removed when a new SDK supporting netcoreapp2.2 is available. -->
     <NETCoreAppMaximumVersion>99.9</NETCoreAppMaximumVersion>
+    <LangVersion>7</LangVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <Folder Include="wwwroot\" />
   </ItemGroup>
 
-  <ItemGroup Condition="$(BenchmarksAspNetCoreVersion) != ''">
-    <PackageReference Include="Microsoft.AspNetCore.App" Version="$(BenchmarksAspNetCoreVersion)"/>
+  <ItemGroup Condition="($(BenchmarksAspNetCoreVersion) != '') And ($(TargetFramework) != 'netcoreapp3.0')">
+    <PackageReference Include="Microsoft.AspNetCore.App" Version="$(BenchmarksAspNetCoreVersion)" />
   </ItemGroup>
 
   <ItemGroup Condition="$(BenchmarksAspNetCoreVersion) == ''">
@@ -21,9 +23,8 @@
   </ItemGroup>
 
   <ItemGroup Condition="$(TargetFramework) == 'netcoreapp3.0'">
-    <!-- This package is implicitly referenced by the .NET SDK and you do not typically need to reference it from your project. -->
-    <!-- It is necessary though for if the SDK doesn't have knowledge of the runtime version, e.g. using SDK 2.1.400 with 3.0.0-preview runtime. -->
-    <PackageReference Include="Microsoft.NetCore.App" Version="$(MicrosoftNETCoreAppPackageVersion)" />
+    <FrameworkReference Update="Microsoft.AspNetCore.App" RuntimeFrameworkVersion="$(MicrosoftAspNetCoreAppPackageVersion)" />
+    <FrameworkReference Update="Microsoft.NETCore.App" RuntimeFrameworkVersion="$(MicrosoftNETCoreAppPackageVersion)" />
   </ItemGroup>
 
 </Project>

@@ -1,0 +1,17 @@
+{
+  "Default": {
+
+    "Client": "Wrk",
+    "PresetHeaders": "Html",
+
+    "Source": {
+      "Repository": "https://github.com/OrchardCMS/OrchardCore",
+      "BranchOrCommit": "master",
+      "Project": "src/OrchardCore.Cms.Web/OrchardCore.Cms.Web.csproj"
+    },
+    "ReadyStateText": "Application started."
+  },
+  "OrchardBlog": {
+    "Path": "/"
+  }
+}

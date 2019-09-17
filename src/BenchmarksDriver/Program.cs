@@ -3,21 +3,20 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
 using Benchmarks.ClientJob;
 using Benchmarks.ServerJob;
 using BenchmarksDriver.Ignore;
 using BenchmarksDriver.Serializers;
-using CsvHelper;
-using CsvHelper.TypeConversion;
 using McMaster.Extensions.CommandLineUtils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -29,21 +28,101 @@ namespace BenchmarksDriver
         private static bool _verbose;
         private static bool _quiet;
         private static bool _displayOutput;
-        private static string _benchmarkdotnet;
         private static TimeSpan _timeout = TimeSpan.FromMinutes(5);
 
-        private static readonly HttpClient _httpClient = new HttpClient();
+        private static readonly HttpClient _httpClient;
+        private static readonly HttpClientHandler _httpClientHandler;
 
         private static ClientJob _clientJob;
         private static string _tableName = "AspNetBenchmarks";
         private const string EventPipeOutputFile = "eventpipe.netperf";
-        private const string DefaultEventPipeConfig = "Microsoft-DotNETCore-SampleProfiler:FFFF:5,Microsoft-Windows-DotNETRuntime:4c14fccbd:5";
+        private static string EventPipeConfig = "Microsoft-DotNETCore-SampleProfiler:FFFF:5,Microsoft-Windows-DotNETRuntime:4c14fccbd:5";
 
         // Default to arguments which should be sufficient for collecting trace of default Plaintext run
         private const string _defaultTraceArguments = "BufferSizeMB=1024;CircularMB=1024;clrEvents=JITSymbols;kernelEvents=process+thread+ImageLoad+Profile";
+        private static List<string> _temporaryFolders = new List<string>();
+
+        private static CommandOption
+            _outputArchiveOption,
+            _buildArchiveOption,
+            _buildFileOption,
+            _initializeOption,
+            _cleanOption,
+            _memoryLimitOption,
+            _enableEventPipeOption,
+            _eventPipeArgumentsOption,
+            _initSubmodulesOption,
+            _branchOption,
+            _hashOption,
+            _noGlobalJsonOption,
+            _collectCountersOption,
+            _noStartupLatencyOption
+            ;
+
+        private static Dictionary<string, string> _deprecatedArguments = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "--projectfile", "--project-file" },
+            { "--outputfile", "--output-file" },
+            { "--clientName", "--client-name" }
+        };
+
+        private static Dictionary<string, string> _synonymArguments = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "--aspnet", "--aspnetcoreversion" },
+            { "--runtime", "--runtimeversion" },
+            { "--clientThreads", "--client-threads" },
+        };
+
+        public static CounterProfile[] Counters = new CounterProfile[]
+        {
+            new CounterProfile{ Name="cpu-usage", Description="Amount of time the process has utilized the CPU (ms)", DisplayName="CPU Usage (%)", Format="", Compute = x => x.Max() },
+            new CounterProfile{ Name="working-set", Description="Amount of working set used by the process (MB)", DisplayName="Working Set (MB)", Format="", Compute = x => x.Max()  },
+            new CounterProfile{ Name="gc-heap-size", Description="Total heap size reported by the GC (MB)", DisplayName="GC Heap Size (MB)", Format="n0", Compute = Percentile(50)  },
+            new CounterProfile{ Name="gen-0-gc-count", Description="Number of Gen 0 GCs / sec", DisplayName="Gen 0 GC (#/s)", Format="n0", Compute = x => x.Average()  },
+            new CounterProfile{ Name="gen-1-gc-count", Description="Number of Gen 1 GCs / sec", DisplayName="Gen 1 GC (#/s)", Format="n0", Compute = x => x.Average()  },
+            new CounterProfile{ Name="gen-2-gc-count", Description="Number of Gen 2 GCs / sec", DisplayName="Gen 2 GC (#/s)", Format="n0", Compute = x => x.Average()  },
+            new CounterProfile{ Name="time-in-gc", Description="% time in GC since the last GC", DisplayName="Time in GC (%)", Format="n0", Compute = x => x.Average()  },
+            new CounterProfile{ Name="gen-0-size", Description="Gen 0 Heap Size", DisplayName="Gen 0 Size (B)", Format="n0", Compute = Percentile(50)  },
+            new CounterProfile{ Name="gen-1-size", Description="Gen 1 Heap Size", DisplayName="Gen 1 Size (B)", Format="n0", Compute = Percentile(50)  },
+            new CounterProfile{ Name="gen-2-size", Description="Gen 2 Heap Size", DisplayName="Gen 2 Size (B)", Format="n0", Compute = Percentile(50)  },
+            new CounterProfile{ Name="loh-size", Description="LOH Heap Size", DisplayName="LOH Size (B)", Format="n0", Compute = Percentile(50)  },
+            new CounterProfile{ Name="alloc-rate", Description="Allocation Rate", DisplayName="Allocation Rate (B/sec)", Format="n0", Compute = x => x.Average()  },
+            new CounterProfile{ Name="assembly-count", Description="Number of Assemblies Loaded", DisplayName="# of Assemblies Loaded", Format="n0", Compute = x => x.Max()  },
+            new CounterProfile{ Name="exception-count", Description="Number of Exceptions / sec", DisplayName="Exceptions (#/s)", Format="n0", Compute = x => x.Average()  },
+            new CounterProfile{ Name="threadpool-thread-count", Description="Number of ThreadPool Threads", DisplayName="ThreadPool Threads Count", Format="n0", Compute = Percentile(50)  },
+            new CounterProfile{ Name="monitor-lock-contention-count", Description="Monitor Lock Contention Count", DisplayName="Lock Contention (#/s)", Format="n0", Compute = x => x.Average()  },
+            new CounterProfile{ Name="threadpool-queue-length", Description="ThreadPool Work Items Queue Length", DisplayName="ThreadPool Queue Length", Format="n0", Compute = Percentile(50)  },
+            new CounterProfile{ Name="threadpool-completed-items-count", Description="ThreadPool Completed Work Items Count", DisplayName="ThreadPool Items (#/s)", Format="n0", Compute = x => x.Average()  },
+        };
+        static Program()
+        {
+            // Configuring the http client to trust the self-signed certificate
+            _httpClientHandler = new HttpClientHandler();
+            _httpClientHandler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+            _httpClientHandler.AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate;
+
+            _httpClient = new HttpClient(_httpClientHandler);
+        }
 
         public static int Main(string[] args)
         {
+            // Replace deprecated arguments with new ones
+            for (var i = 0; i < args.Length; i++)
+            {
+                var arg = args[i];
+
+                if (_deprecatedArguments.TryGetValue(arg, out var mappedArg))
+                {
+                    Log($"WARNING: '{arg}' has been deprecated, in the future please use '{mappedArg}'.");
+                    args[i] = mappedArg;
+                }
+                else if (_synonymArguments.TryGetValue(arg, out var synonymArg))
+                {
+                    // We don't need to display a warning
+                    args[i] = synonymArg;
+                }
+            }
+
             var app = new CommandLineApplication()
             {
                 Name = "BenchmarksDriver",
@@ -57,8 +136,8 @@ namespace BenchmarksDriver
 
             // Driver Options
             var clientOption = app.Option("-c|--client",
-                "URL of benchmark client", CommandOptionType.SingleValue);
-            var clientNameOption = app.Option("--clientName",
+                "URL of benchmark client", CommandOptionType.MultipleValue);
+            var clientNameOption = app.Option("--client-name",
                 "Name of client to use for testing, e.g. Wrk", CommandOptionType.SingleValue);
             var serverOption = app.Option("-s|--server",
                 "URL of benchmark server", CommandOptionType.SingleValue);
@@ -97,13 +176,13 @@ namespace BenchmarksDriver
             var displayOutputOption = app.Option("--display-output",
                 "Displays the standard output from the server job.", CommandOptionType.NoValue);
             var benchmarkdotnetOption = app.Option("--benchmarkdotnet",
-                "Runs a BenchmarkDotNet application. e.g., --benchmarkdotnet Md5VsSha256.Sha256.", CommandOptionType.SingleValue);
+                "Runs a BenchmarkDotNet application, with an optional filter. e.g., --benchmarkdotnet, --benchmarkdotnet:*MyBenchmark*", CommandOptionType.SingleOrNoValue);
+            var consoleOption = app.Option("--console",
+                "Runs the benchmarked application as a console application, such that no client is used and its output is displayed locally.", CommandOptionType.NoValue);
 
             // ServerJob Options
             var databaseOption = app.Option("--database",
                 "The type of database to run the benchmarks with (PostgreSql, SqlServer or MySql). Default is None.", CommandOptionType.SingleValue);
-            var connectionFilterOption = app.Option("-cf|--connectionFilter",
-                "Assembly-qualified name of the ConnectionFilter", CommandOptionType.SingleValue);
             var kestrelThreadCountOption = app.Option("--kestrelThreadCount",
                 "Maps to KestrelServerOptions.ThreadCount.",
                 CommandOptionType.SingleValue);
@@ -122,12 +201,16 @@ namespace BenchmarksDriver
             var argOption = app.Option("-a|--arg",
                 "Argument to pass to the application. (e.g., --arg \"--raw=true\" --arg \"single_value\")", CommandOptionType.MultipleValue);
             var noArgumentsOptions = app.Option("--no-arguments",
-                "Removes any predefined arguments.", CommandOptionType.NoValue);
+                "Removes any predefined arguments from the server application command line.", CommandOptionType.NoValue);
             var portOption = app.Option("--port",
                 "The port used to request the benchmarked application. Default is 5000.", CommandOptionType.SingleValue);
             var readyTextOption = app.Option("--ready-text",
                 "The text that is displayed when the application is ready to accept requests. (e.g., \"Application started.\")", CommandOptionType.SingleValue);
             var repositoryOption = app.Option("-r|--repository",
+                "Git repository containing the project to test.", CommandOptionType.SingleValue);
+            _branchOption = app.Option("-b|--branch",
+                "Git repository containing the project to test.", CommandOptionType.SingleValue);
+            _hashOption = app.Option("-h|--hash",
                 "Git repository containing the project to test.", CommandOptionType.SingleValue);
             var sourceOption = app.Option("-src|--source",
                 "Local folder containing the project to test.", CommandOptionType.SingleValue);
@@ -137,16 +220,33 @@ namespace BenchmarksDriver
                 "Docker context directory. Defaults to the Docker file directory. (e.g., \"frameworks/CSharp/aspnetcore/\")", CommandOptionType.SingleValue);
             var dockerImageOption = app.Option("-di|--docker-image",
                 "The name of the Docker image to create. If not net one will be created from the Docker file name. (e.g., \"aspnetcore21\")", CommandOptionType.SingleValue);
-            var projectOption = app.Option("--projectFile",
+            var projectOption = app.Option("--project-file",
                 "Relative path of the project to test in the repository. (e.g., \"src/Benchmarks/Benchmarks.csproj)\"", CommandOptionType.SingleValue);
+            _initSubmodulesOption = app.Option("--init-submodules",
+                "When set will init submodules on the repository.", CommandOptionType.NoValue);
             var useRuntimeStoreOption = app.Option("--runtime-store",
                 "Runs the benchmarks using the runtime store (2.0) or shared aspnet framework (2.1).", CommandOptionType.NoValue);
             var selfContainedOption = app.Option("--self-contained",
                 "Publishes the .NET Core runtime with the application.", CommandOptionType.NoValue);
-            var outputFileOption = app.Option("--outputFile",
-                "Output file attachment. Format is 'path[;destination]'. FilePath can be a URL. e.g., " +
-                "\"--outputFile c:\\build\\Microsoft.AspNetCore.Mvc.dll\", " +
-                "\"--outputFile c:\\files\\samples\\picture.png;wwwroot\\picture.png\"",
+            var outputFileOption = app.Option("--output-file",
+                "Output file attachment. Format is 'path[;destination]'. Path can be a URL. e.g., " +
+                "\"--output-file c:\\build\\Microsoft.AspNetCore.Mvc.dll\", " +
+                "\"--output-file c:\\files\\samples\\picture.png;wwwroot\\picture.png\"",
+                CommandOptionType.MultipleValue);
+            _buildFileOption = app.Option("--build-file",
+                "Build file attachment. Format is 'path[;destination]'. Path can be a URL. e.g., " +
+                "\"--build-file c:\\build\\Microsoft.AspNetCore.Mvc.dll\", " +
+                "\"--build-file c:\\files\\samples\\picture.png;wwwroot\\picture.png\"",
+                CommandOptionType.MultipleValue);
+            _outputArchiveOption = app.Option("--output-archive",
+                "Output archive attachment. Format is 'path[;destination]'. Path can be a URL. e.g., " +
+                "\"--output-archive c:\\build\\Microsoft.AspNetCore.Mvc.zip\", " +
+                "\"--output-archive http://raw/github.com/pictures.zip;wwwroot\\pictures\"",
+                CommandOptionType.MultipleValue);
+            _buildArchiveOption = app.Option("--build-archive",
+                "Build archive attachment. Format is 'path[;destination]'. Path can be a URL. e.g., " +
+                "\"--build-archive c:\\build\\Microsoft.AspNetCore.Mvc.zip\", " +
+                "\"--build-archive http://raw/github.com/pictures.zip;wwwroot\\pictures\"",
                 CommandOptionType.MultipleValue);
             var scriptFileOption = app.Option("--script",
                 "WRK script path. File path can be a URL. e.g., " +
@@ -154,10 +254,16 @@ namespace BenchmarksDriver
                 CommandOptionType.MultipleValue);
             var collectTraceOption = app.Option("--collect-trace",
                 "Collect a PerfView trace.", CommandOptionType.NoValue);
-            var enableEventPipeOption = app.Option("--enable-eventpipe",
+            var collectStartup = app.Option("--collect-startup",
+                "Includes the startup phase in the trace.", CommandOptionType.NoValue);
+            _collectCountersOption = app.Option("--collect-counters",
+                "Collect event counters.", CommandOptionType.NoValue);
+            _enableEventPipeOption = app.Option("--enable-eventpipe",
                 "Enables EventPipe perf collection.", CommandOptionType.NoValue);
+            _eventPipeArgumentsOption = app.Option("--eventpipe-arguments",
+                $"EventPipe configuration. Defaults to \"{EventPipeConfig}\"", CommandOptionType.SingleValue);
             var traceArgumentsOption = app.Option("--trace-arguments",
-                $"Arguments used when collecting a PerfView trace.  Defaults to \"{_defaultTraceArguments}\".",
+                $"Arguments used when collecting a PerfView trace. Defaults to \"{_defaultTraceArguments}\".",
                 CommandOptionType.SingleValue);
             var traceOutputOption = app.Option("--trace-output",
                 @"Can be a file prefix (app will add *.DATE.RPS*.etl.zip) , or a specific name (end in *.etl.zip) and no DATE.RPS* will be added e.g. --trace-output c:\traces\myTrace", CommandOptionType.SingleValue);
@@ -169,8 +275,8 @@ namespace BenchmarksDriver
                 "Download the Ready To Run log.", CommandOptionType.NoValue);
             var environmentVariablesOption = app.Option("-e|--env",
                 "Defines custom environment variables to use with the benchmarked application e.g., -e \"KEY=VALUE\" -e \"A=B\"", CommandOptionType.MultipleValue);
-            var buildProperties = app.Option("-b|--build-property",
-                "Defines custom build properties to use with the benchmarked application e.g., -bp \"KEY=VALUE\" -e \"A=B\"", CommandOptionType.MultipleValue);
+            var buildArguments = app.Option("-ba|--build-arg",
+                "Defines custom build arguments to use with the benchmarked application e.g., -b \"/p:foo=bar\" --build-arg \"quiet\"", CommandOptionType.MultipleValue);
             var downloadFilesOption = app.Option("-d|--download",
                 "Downloads specific server files. This argument can be used multiple times. e.g., -d \"published/wwwroot/picture.png\"", CommandOptionType.MultipleValue);
             var noCleanOption = app.Option("--no-clean",
@@ -181,9 +287,21 @@ namespace BenchmarksDriver
                 @"Can be a file prefix (app will add *.DATE*.zip) , or a specific name (end in *.zip) and no DATE* will be added e.g. --fetch-output c:\publishedapps\myApp", CommandOptionType.SingleValue);
             var serverTimeoutOption = app.Option("--server-timeout",
                 "Timeout for server jobs. e.g., 00:05:00", CommandOptionType.SingleValue);
+            var frameworkOption = app.Option("--framework",
+                "TFM to use if automatic resolution based runtime should not be used. e.g., netcoreapp2.1", CommandOptionType.SingleValue);
+            var sdkOption = app.Option("--sdk",
+                "SDK version to use", CommandOptionType.SingleValue);
+            _noGlobalJsonOption = app.Option("--no-global-json",
+                "Doesn't generate global.json", CommandOptionType.NoValue);
+            _initializeOption = app.Option("--initialize",
+                "A script to run before the application starts, e.g. \"du\", \"/usr/bin/env bash dotnet-install.sh\"", CommandOptionType.SingleValue);
+            _cleanOption = app.Option("--clean",
+                "A script to run after the application has stopped, e.g. \"du\", \"/usr/bin/env bash dotnet-install.sh\"", CommandOptionType.SingleValue);
+            _memoryLimitOption = app.Option("-mem|--memory",
+                "The amount of memory available for the process, e.g. -mem 64mb, -mem 1gb. Supported units are (gb, mb, kb, b or none for bytes).", CommandOptionType.SingleValue);
 
             // ClientJob Options
-            var clientThreadsOption = app.Option("--clientThreads",
+            var clientThreadsOption = app.Option("--client-threads",
                 "Number of threads used by client. Default is 32.", CommandOptionType.SingleValue);
             var clientTimeoutOption = app.Option("--client-timeout",
                 "Timeout for client connections. e.g., 2s", CommandOptionType.SingleValue);
@@ -213,7 +331,7 @@ namespace BenchmarksDriver
                 CommandOptionType.SingleValue);
             var jobsOptions = app.Option("-j|--jobs",
                 "The path or url to the jobs definition.", CommandOptionType.SingleValue);
-            var noStartupLatencyOption = app.Option("-nsl|--no-startup-latency",
+            _noStartupLatencyOption = app.Option("-nsl|--no-startup-latency",
                 "Skip startup latency measurement.", CommandOptionType.NoValue);
 
             app.OnExecute(() =>
@@ -221,7 +339,7 @@ namespace BenchmarksDriver
                 _verbose = verboseOption.HasValue();
                 _quiet = quietOption.HasValue();
                 _displayOutput = displayOutputOption.HasValue();
-                
+
                 if (serverTimeoutOption.HasValue())
                 {
                     TimeSpan.TryParse(serverTimeoutOption.Value(), out _timeout);
@@ -256,7 +374,7 @@ namespace BenchmarksDriver
                 }
 
                 var server = serverOption.Value();
-                var client = clientOption.Value();
+                var clients = clientOption.Values;
                 var headers = Headers.Html;
                 var jobDefinitionPathOrUrl = jobsOptions.Value();
                 var iterations = 1;
@@ -270,13 +388,43 @@ namespace BenchmarksDriver
                     (headersOption.HasValue() && !Enum.TryParse(headersOption.Value(), ignoreCase: true, result: out headers)) ||
                     (databaseOption.HasValue() && !Enum.TryParse(databaseOption.Value(), ignoreCase: true, result: out Database database)) ||
                     string.IsNullOrWhiteSpace(server) ||
-                    string.IsNullOrWhiteSpace(client) ||
+                    (clients.Any(client => string.IsNullOrWhiteSpace(client)) && !(benchmarkdotnetOption.HasValue() || consoleOption.HasValue())) ||
                     (spanOption.HasValue() && !TimeSpan.TryParse(spanOption.Value(), result: out span)) ||
                     (iterationsOption.HasValue() && !int.TryParse(iterationsOption.Value(), result: out iterations)) ||
                     (excludeOption.HasValue() && !int.TryParse(excludeOption.Value(), result: out exclude)))
                 {
                     app.ShowHelp();
                     return 2;
+                }
+
+                foreach(var client in clients)
+                {
+                    try
+                    {
+                        using (var cts = new CancellationTokenSource(2000))
+                        {
+                            var response = _httpClient.GetAsync(client, cts.Token).Result;
+                            response.EnsureSuccessStatusCode();
+                        }
+                    }
+                    catch
+                    {
+                        Console.WriteLine($"The specified client url '{client}' is invalid or not responsive.");
+                        return 2;
+                    }
+                }
+
+                try
+                {
+                    using (var cts = new CancellationTokenSource(2000))
+                    {
+                        var response = _httpClient.GetAsync(server, cts.Token).Result;
+                        response.EnsureSuccessStatusCode();
+                    }
+                }
+                catch
+                {
+                    Console.WriteLine($"The specified server url '{server}' is invalid or not responsive.");
                 }
 
                 if (sqlTableOption.HasValue())
@@ -332,10 +480,9 @@ namespace BenchmarksDriver
                 }
                 else
                 {
-                    if (scenarioOption.HasValue())
+                    if (!scenarioOption.HasValue())
                     {
-                        Console.WriteLine($"Job named '{scenarioName}' was specified but no job definition argument.");
-                        return 8;
+                        scenarioName = "Default";
                     }
 
                     if ((!(repositoryOption.HasValue() || sourceOption.HasValue()) ||
@@ -347,7 +494,7 @@ namespace BenchmarksDriver
                     }
 
                     jobDefinitions = new JobDefinition();
-                    jobDefinitions.Add("Default", new JObject());
+                    jobDefinitions.Add(scenarioName, new JObject());
                 }
 
                 var mergeOptions = new JsonMergeSettings { MergeArrayHandling = MergeArrayHandling.Replace, MergeNullValueHandling = MergeNullValueHandling.Merge };
@@ -393,6 +540,99 @@ namespace BenchmarksDriver
                 serverJob.Scenario = scenarioName;
                 serverJob.WebHost = webHost;
 
+                foreach (var argument in serverJob.OutputFilesArgument)
+                {
+                    outputFileOption.Values.Add(argument);
+                }
+
+                foreach (var argument in serverJob.OutputArchivesArgument)
+                {
+                    _outputArchiveOption.Values.Add(argument);
+                }
+
+                foreach (var argument in serverJob.BuildFilesArgument)
+                {
+                    _buildFileOption.Values.Add(argument);
+                }
+
+                foreach (var argument in serverJob.BuildArchivesArgument)
+                {
+                    _buildArchiveOption.Values.Add(argument);
+                }
+
+                if (_memoryLimitOption.HasValue())
+                {
+                    var memoryLimitValue = _memoryLimitOption.Value();
+
+                    if (memoryLimitValue.EndsWith("mb", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (ulong.TryParse(memoryLimitValue.Substring(0, memoryLimitValue.Length - 2), out var megaBytes))
+                        {
+                            serverJob.MemoryLimitInBytes = megaBytes * 1024 * 1024;
+                        }
+                        else
+                        {
+                            Console.WriteLine("Invalid memory limit value");
+                            return -1;
+                        }
+                    }
+                    else if (memoryLimitValue.EndsWith("gb", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (ulong.TryParse(memoryLimitValue.Substring(0, memoryLimitValue.Length - 2), out var gigaBytes))
+                        {
+                            serverJob.MemoryLimitInBytes = gigaBytes * 1024 * 1024 * 1024;
+                        }
+                        else
+                        {
+                            Console.WriteLine("Invalid memory limit value");
+                            return -1;
+                        }
+                    }
+                    else if (memoryLimitValue.EndsWith("kb", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (ulong.TryParse(memoryLimitValue.Substring(0, memoryLimitValue.Length - 2), out var kiloBytes))
+                        {
+                            serverJob.MemoryLimitInBytes = kiloBytes * 1024;
+                        }
+                        else
+                        {
+                            Console.WriteLine("Invalid memory limit value");
+                            return -1;
+                        }
+                    }
+                    else if (memoryLimitValue.EndsWith("b", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (ulong.TryParse(memoryLimitValue.Substring(0, memoryLimitValue.Length - 1), out var bytes))
+                        {
+                            serverJob.MemoryLimitInBytes = bytes;
+                        }
+                        else
+                        {
+                            Console.WriteLine("Invalid memory limit value");
+                            return -1;
+                        }
+                    }
+                    else
+                    {
+                        if (ulong.TryParse(memoryLimitValue, out var bytes))
+                        {
+                            serverJob.MemoryLimitInBytes = bytes;
+                        }
+                        else
+                        {
+                            Console.WriteLine("Invalid memory limit value");
+                            return -1;
+                        }
+                    }
+                }
+                if (_initializeOption.HasValue())
+                {
+                    serverJob.BeforeScript = _initializeOption.Value();
+                }
+                if (_cleanOption.HasValue())
+                {
+                    serverJob.AfterScript = _cleanOption.Value();
+                }
                 if (databaseOption.HasValue())
                 {
                     serverJob.Database = Enum.Parse<Database>(databaseOption.Value(), ignoreCase: true);
@@ -400,10 +640,6 @@ namespace BenchmarksDriver
                 if (pathOption.HasValue())
                 {
                     serverJob.Path = pathOption.Value();
-                }
-                if (connectionFilterOption.HasValue())
-                {
-                    serverJob.ConnectionFilter = connectionFilterOption.Value();
                 }
                 if (schemeOption.HasValue())
                 {
@@ -416,6 +652,26 @@ namespace BenchmarksDriver
                 if (selfContainedOption.HasValue())
                 {
                     serverJob.SelfContained = true;
+                }
+                else
+                {
+                    if (outputFileOption.HasValue() || _outputArchiveOption.HasValue())
+                    {
+                        serverJob.SelfContained = true;
+
+                        Console.ForegroundColor = ConsoleColor.DarkYellow;
+                        Log("WARNING: '--self-contained' has been set implicitly as custom local files are used.");
+                        Console.ResetColor();
+                    }
+                    else if (aspnetCoreVersionOption.HasValue() || runtimeVersionOption.HasValue())
+                    {
+                        serverJob.SelfContained = true;
+
+                        Console.ForegroundColor = ConsoleColor.DarkYellow;
+                        Log("WARNING: '--self-contained' has been set implicitly as custom runtime versions are used.");
+                        Console.ResetColor();
+                    }
+
                 }
                 if (kestrelThreadCountOption.HasValue())
                 {
@@ -440,7 +696,7 @@ namespace BenchmarksDriver
                         else
                         {
                             serverJob.Arguments += $" {arg.Substring(0, equalSignIndex)} {arg.Substring(equalSignIndex + 1)}";
-                        }                        
+                        }
                     }
                 }
                 if (portOption.HasValue())
@@ -458,9 +714,13 @@ namespace BenchmarksDriver
                 if (repositoryOption.HasValue())
                 {
                     var source = repositoryOption.Value();
-                    var split = source.IndexOf('@');
-                    var repository = (split == -1) ? source : source.Substring(0, split);
-                    serverJob.Source.BranchOrCommit = (split == -1) ? null : source.Substring(split + 1);
+                    var sourceParts = source.Split('@', 2);
+                    var repository = sourceParts[0];
+
+                    if (sourceParts.Length > 1)
+                    {
+                        serverJob.Source.BranchOrCommit = sourceParts[1];
+                    }
 
                     if (!repository.Contains(":"))
                     {
@@ -468,6 +728,14 @@ namespace BenchmarksDriver
                     }
 
                     serverJob.Source.Repository = repository;
+                }
+                if (_branchOption.HasValue())
+                {
+                    serverJob.Source.BranchOrCommit = _branchOption.Value();
+                }
+                if (_hashOption.HasValue())
+                {
+                    serverJob.Source.BranchOrCommit = "#" + _hashOption.Value();
                 }
                 if (dockerFileOption.HasValue())
                 {
@@ -491,6 +759,10 @@ namespace BenchmarksDriver
                         serverJob.Source.DockerImageName = Path.GetFileNameWithoutExtension(serverJob.Source.DockerFile).Replace("-", "_").Replace("\\", "/").ToLowerInvariant();
                     }
                 }
+                if (_initSubmodulesOption.HasValue())
+                {
+                    serverJob.Source.InitSubmodules = true;
+                }
                 if (projectOption.HasValue())
                 {
                     serverJob.Source.Project = projectOption.Value();
@@ -498,6 +770,18 @@ namespace BenchmarksDriver
                 if (noCleanOption.HasValue())
                 {
                     serverJob.NoClean = true;
+                }
+                if (frameworkOption.HasValue())
+                {
+                    serverJob.Framework = frameworkOption.Value();
+                }
+                if (sdkOption.HasValue())
+                {
+                    serverJob.SdkVersion = sdkOption.Value();
+                }
+                if (_noGlobalJsonOption.HasValue())
+                {
+                    serverJob.NoGlobalJson = true;
                 }
                 if (collectTraceOption.HasValue())
                 {
@@ -511,7 +795,9 @@ namespace BenchmarksDriver
 
                         foreach (var item in allTraceArguments)
                         {
-                            if (String.IsNullOrEmpty(item.Value))
+                            // null value to remove the argument
+                            // empty value to keep the argument with no value, e.g. /GCCollectOnly
+                            if (item.Value == null)
                             {
                                 allDefaultArguments.Remove(item.Key);
                             }
@@ -528,7 +814,15 @@ namespace BenchmarksDriver
                         serverJob.CollectArguments = _defaultTraceArguments;
                     }
                 }
-                if (enableEventPipeOption.HasValue())
+                if (collectTraceOption.HasValue())
+                {
+                    serverJob.CollectStartup = true;
+                }
+                if (_collectCountersOption.HasValue())
+                {
+                    serverJob.CollectCounters = true;
+                }
+                if (_enableEventPipeOption.HasValue())
                 {
                     // Enable Event Pipes
                     serverJob.EnvironmentVariables.Add("COMPlus_EnableEventPipe", "1");
@@ -536,8 +830,13 @@ namespace BenchmarksDriver
                     // Set a specific name to find it more easily
                     serverJob.EnvironmentVariables.Add("COMPlus_EventPipeOutputFile", EventPipeOutputFile);
 
+                    if (_eventPipeArgumentsOption.HasValue())
+                    {
+                        EventPipeConfig = _eventPipeArgumentsOption.Value();
+                    }
+
                     // Default EventPipeConfig value
-                    serverJob.EnvironmentVariables.Add("COMPlus_EventPipeConfig", DefaultEventPipeConfig);
+                    serverJob.EnvironmentVariables.Add("COMPlus_EventPipeConfig", EventPipeConfig);
                 }
                 if (disableR2ROption.HasValue())
                 {
@@ -575,35 +874,22 @@ namespace BenchmarksDriver
                         }
                     }
                 }
-                if (buildProperties.HasValue())
+                if (buildArguments.HasValue())
                 {
-                    foreach (var bp in buildProperties.Values)
+                    foreach (var argument in buildArguments.Values)
                     {
-                        var index = bp.IndexOf('=');
-
-                        if (index == -1)
-                        {
-                            if (index == -1)
-                            {
-                                Console.WriteLine($"Invalid build property, '=' not found: '{bp}'");
-                                return 9;
-                            }
-                        }
-                        else if (index == bp.Length - 1)
-                        {
-                            serverJob.BuildProperties[bp.Substring(0, index)] = "";
-                        }
-                        else
-                        {
-                            serverJob.BuildProperties[bp.Substring(0, index)] = bp.Substring(index + 1);
-                        }
+                        serverJob.BuildArguments.Add(argument);
                     }
                 }
 
-                if (saveOption.HasValue() && (!descriptionOption.HasValue() || String.IsNullOrWhiteSpace(descriptionOption.Value())))
+                if (saveOption.HasValue())
                 {
-                    Console.WriteLine($"The --description argument is mandatory when using --save.");
-                    return -1;
+                    if (!descriptionOption.HasValue() || String.IsNullOrWhiteSpace(descriptionOption.Value()))
+                    {
+                        // Copy the --save value as the description
+                        // It also means that if --diff and --save are used, --diff won't require a --description
+                        descriptionOption = saveOption;
+                    }
                 }
 
                 if (diffOption.HasValue() && (!descriptionOption.HasValue() || String.IsNullOrWhiteSpace(descriptionOption.Value())))
@@ -620,7 +906,7 @@ namespace BenchmarksDriver
                         var fileSegments = outputFile.Split(';');
                         var filename = fileSegments[0];
 
-                        if (!File.Exists(filename))
+                        if (!filename.Contains("*") && !filename.Contains("http") && !File.Exists(filename))
                         {
                             Console.WriteLine($"Output File '{filename}' could not be loaded.");
                             return 8;
@@ -660,16 +946,37 @@ namespace BenchmarksDriver
 
                 if (benchmarkdotnetOption.HasValue())
                 {
-                    serverJob.Scenario = benchmarkdotnetOption.Value();
+                    if (String.IsNullOrEmpty(serverJob.Scenario))
+                    {
+                        serverJob.Scenario = "Benchmark.NET";
+                    }
+
+                    serverJob.NoArguments = true;
                     _clientJob.Client = Worker.BenchmarkDotNet;
-                    _benchmarkdotnet = benchmarkdotnetOption.Value();
+
+                    var bdnScenario = benchmarkdotnetOption.Value();
+                    if (String.IsNullOrEmpty(bdnScenario))
+                    {
+                        bdnScenario = "*";
+                    }
+
+                    serverJob.Arguments += $" --inProcess --cli {{{{benchmarks-cli}}}} --filter {bdnScenario}";
+                }
+
+                if (consoleOption.HasValue())
+                {
+                    serverJob.IsConsoleApp = true;
+                    _clientJob.Client = Worker.None;
+                    serverJob.CollectStartup = true;
                 }
 
                 Log($"Using worker {_clientJob.Client}");
 
                 if (_clientJob.Client == Worker.BenchmarkDotNet)
                 {
+                    serverJob.IsConsoleApp = true;
                     serverJob.ReadyStateText = "BenchmarkRunner: Start";
+                    serverJob.CollectStartup = true;
                 }
 
                 // The ready state option overrides BenchmarDotNet's value
@@ -717,6 +1024,8 @@ namespace BenchmarksDriver
                     }
                 }
 
+                _clientJob.ClientProperties["protocol"] = schemeValue;
+
                 if (methodOption.HasValue())
                 {
                     _clientJob.Method = methodOption.Value();
@@ -728,10 +1037,6 @@ namespace BenchmarksDriver
                 if (span > TimeSpan.Zero)
                 {
                     _clientJob.SpanId = Guid.NewGuid().ToString("n");
-                }
-                if (noStartupLatencyOption.HasValue())
-                {
-                    _clientJob.SkipStartupLatencies = true;
                 }
 
                 switch (headers)
@@ -759,15 +1064,15 @@ namespace BenchmarksDriver
                 {
                     foreach (var header in headerOption.Values)
                     {
-                        var index = header.IndexOf('=');
+                        var segments = header.Split('=', 2);
 
-                        if (index == -1)
+                        if (segments.Length != 2)
                         {
                             Console.WriteLine($"Invalid http header, '=' not found: '{header}'");
                             return 9;
                         }
 
-                        _clientJob.Headers[header.Substring(0, index)] = header.Substring(index + 1, header.Length - index - 1);
+                        _clientJob.Headers[segments[0].Trim()] = segments[1].Trim();
                     }
                 }
 
@@ -785,7 +1090,7 @@ namespace BenchmarksDriver
 
                 return Run(
                     new Uri(server),
-                    new Uri(client),
+                    clients.Select(client => new Uri(client)).ToArray(),
                     sqlConnectionString,
                     serverJob,
                     session,
@@ -804,7 +1109,6 @@ namespace BenchmarksDriver
                     scriptFileOption,
                     markdownOption,
                     writeToFileOption,
-                    enableEventPipeOption.HasValue(),
                     requiredOperatingSystem,
                     saveOption,
                     diffOption
@@ -837,17 +1141,21 @@ namespace BenchmarksDriver
             {
                 return app.Execute(args);
             }
-            catch(CommandParsingException e)
+            catch (CommandParsingException e)
             {
                 Console.WriteLine();
                 Console.WriteLine(e.Message);
                 return -1;
             }
+            finally
+            {
+                CleanTemporaryFiles();
+            }
         }
 
         private static async Task<int> Run(
             Uri serverUri,
-            Uri clientUri,
+            Uri[] clientUris,
             string sqlConnectionString,
             ServerJob serverJob,
             string session,
@@ -866,7 +1174,6 @@ namespace BenchmarksDriver
             CommandOption scriptFileOption,
             CommandOption markdownOption,
             CommandOption writeToFileOption,
-            bool enableEventPipe,
             Benchmarks.ServerJob.OperatingSystem? requiredOperatingSystem,
             CommandOption saveOption,
             CommandOption diffOption
@@ -879,7 +1186,7 @@ namespace BenchmarksDriver
             string responseContent = null;
 
             var results = new List<Statistics>();
-            ClientJob clientJob = null;
+            ClientJob[] clientJobs = null;
 
             var serializer = WorkerFactory.CreateResultSerializer(_clientJob);
 
@@ -994,19 +1301,134 @@ namespace BenchmarksDriver
                                 {
                                     return result;
                                 }
+                            }
 
+                            // Upload custom package contents
+                            if (_outputArchiveOption.HasValue())
+                            {
+                                foreach (var outputArchiveValue in _outputArchiveOption.Values)
+                                {
+                                    var outputFileSegments = outputArchiveValue.Split(';', 2, StringSplitOptions.RemoveEmptyEntries);
+
+                                    string localArchiveFilename = outputFileSegments[0];
+
+                                    var tempFolder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+
+                                    if (Directory.Exists(tempFolder))
+                                    {
+                                        Directory.Delete(tempFolder, true);
+                                    }
+
+                                    Directory.CreateDirectory(tempFolder);
+
+                                    _temporaryFolders.Add(tempFolder);
+
+                                    // Download the archive, while pinging the server to keep the job alive
+                                    if (outputArchiveValue.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        localArchiveFilename = await DownloadTemporaryFileAsync(localArchiveFilename, serverJobUri);
+                                    }
+
+                                    ZipFile.ExtractToDirectory(localArchiveFilename, tempFolder);
+
+                                    if (outputFileSegments.Length > 1)
+                                    {
+                                        outputFileOption.Values.Add(Path.Combine(tempFolder,"*.*") + ";" + outputFileSegments[1]);
+                                    }
+                                    else
+                                    {
+                                        outputFileOption.Values.Add(Path.Combine(tempFolder, "*.*"));
+                                    }                                    
+                                }
+                            }
+
+                            // Upload custom build package contents
+                            if (_buildArchiveOption.HasValue())
+                            {
+                                foreach (var buildArchiveValue in _buildArchiveOption.Values)
+                                {
+                                    var buildFileSegments = buildArchiveValue.Split(';', 2, StringSplitOptions.RemoveEmptyEntries);
+
+                                    string localArchiveFilename = buildFileSegments[0];
+
+                                    var tempFolder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+
+                                    if (Directory.Exists(tempFolder))
+                                    {
+                                        Directory.Delete(tempFolder, true);
+                                    }
+
+                                    Directory.CreateDirectory(tempFolder);
+
+                                    _temporaryFolders.Add(tempFolder);
+
+                                    // Download the archive, while pinging the server to keep the job alive
+                                    if (buildArchiveValue.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        localArchiveFilename = await DownloadTemporaryFileAsync(localArchiveFilename, serverJobUri);
+                                    }
+
+                                    ZipFile.ExtractToDirectory(localArchiveFilename, tempFolder);
+
+                                    if (buildFileSegments.Length > 1)
+                                    {
+                                        _buildFileOption.Values.Add(Path.Combine(tempFolder, "*.*") + ";" + buildFileSegments[1]);
+                                    }
+                                    else
+                                    {
+                                        _buildFileOption.Values.Add(Path.Combine(tempFolder, "*.*"));
+                                    }
+                                }
+                            }
+
+                            // Uploading build files
+                            if (_buildFileOption.HasValue())
+                            {
+                                foreach (var buildFileValue in _buildFileOption.Values)
+                                {
+                                    var buildFileSegments = buildFileValue.Split(';', 2, StringSplitOptions.RemoveEmptyEntries);
+
+                                    foreach (var resolvedFile in Directory.GetFiles(Path.GetDirectoryName(buildFileSegments[0]), Path.GetFileName(buildFileSegments[0]), SearchOption.AllDirectories))
+                                    {
+                                        var resolvedFileWithDestination = resolvedFile;
+
+                                        if (buildFileSegments.Length > 1)
+                                        {
+                                            resolvedFileWithDestination += ";" + buildFileSegments[1] + Path.GetDirectoryName(resolvedFile).Substring(Path.GetDirectoryName(buildFileSegments[0]).Length) + "/" + Path.GetFileName(resolvedFileWithDestination);
+                                        }
+
+                                        var result = await UploadFileAsync(resolvedFileWithDestination, serverJob, serverJobUri + "/build");
+
+                                        if (result != 0)
+                                        {
+                                            return result;
+                                        }
+                                    }
+                                }
                             }
 
                             // Uploading attachments
                             if (outputFileOption.HasValue())
                             {
-                                foreach (var outputFile in outputFileOption.Values)
+                                foreach (var outputFileValue in outputFileOption.Values)
                                 {
-                                    var result = await UploadFileAsync(outputFile, serverJob, serverJobUri + "/attachment");
+                                    var outputFileSegments = outputFileValue.Split(';', 2, StringSplitOptions.RemoveEmptyEntries);
 
-                                    if (result != 0)
+                                    foreach (var resolvedFile in Directory.GetFiles(Path.GetDirectoryName(outputFileSegments[0]), Path.GetFileName(outputFileSegments[0]), SearchOption.AllDirectories))
                                     {
-                                        return result;
+                                        var resolvedFileWithDestination = resolvedFile;
+
+                                        if (outputFileSegments.Length > 1)
+                                        {
+                                            resolvedFileWithDestination += ";" + outputFileSegments[1] + Path.GetDirectoryName(resolvedFile).Substring(Path.GetDirectoryName(outputFileSegments[0]).Length) + "/" + Path.GetFileName(resolvedFileWithDestination);
+                                        }
+
+                                        var result = await UploadFileAsync(resolvedFileWithDestination, serverJob, serverJobUri + "/attachment");
+
+                                        if (result != 0)
+                                        {
+                                            return result;
+                                        }
                                     }
                                 }
                             }
@@ -1016,7 +1438,9 @@ namespace BenchmarksDriver
                             LogVerbose($"{(int)response.StatusCode} {response.StatusCode}");
                             response.EnsureSuccessStatusCode();
 
-                            Log($"Server Job ready");
+                            serverJob = JsonConvert.DeserializeObject<ServerJob>(responseContent);
+
+                            Log($"Job submitted, waiting...");
 
                             break;
                         }
@@ -1029,6 +1453,8 @@ namespace BenchmarksDriver
                     var serverBenchmarkUri = (string)null;
                     while (true)
                     {
+                        var previousJob = serverJob;
+
                         LogVerbose($"GET {serverJobUri}...");
                         response = await _httpClient.GetAsync(serverJobUri);
                         responseContent = await response.Content.ReadAsStringAsync();
@@ -1059,6 +1485,11 @@ namespace BenchmarksDriver
 
                         if (serverJob.State == ServerState.Running)
                         {
+                            if (previousJob.State == ServerState.Waiting)
+                            {
+                                Log($"Job acquired");
+                            }
+
                             serverBenchmarkUri = serverJob.Url;
                             break;
                         }
@@ -1066,7 +1497,12 @@ namespace BenchmarksDriver
                         {
                             Log($"Job failed on benchmark server, stopping...");
 
-                            Console.WriteLine(serverJob.Error);
+                            if (_displayOutput)
+                            {
+                                DisplayOutput(serverJob);
+                            }
+
+                            Log(serverJob.Error, notime: true, error: true);
 
                             // Returning will also send a Delete message to the server
                             return -1;
@@ -1078,9 +1514,11 @@ namespace BenchmarksDriver
                         }
                         else if (serverJob.State == ServerState.Stopped)
                         {
+                            Log($"Job finished");
+
                             // If there is no ReadyStateText defined, the server will never fo in Running state
                             // and we'll reach the Stopped state eventually, but that's a normal behavior.
-                            if (_clientJob.Client == Worker.None || _clientJob.Client == Worker.BenchmarkDotNet)
+                            if (IsConsoleApp)
                             {
                                 serverBenchmarkUri = serverJob.Url;
                                 break;
@@ -1093,27 +1531,38 @@ namespace BenchmarksDriver
                             await Task.Delay(1000);
                         }
                     }
+
                     System.Threading.Thread.Sleep(200);  // Make it clear on traces when startup has finished and warmup begins.
 
                     TimeSpan latencyNoLoad = TimeSpan.Zero, latencyFirstRequest = TimeSpan.Zero;
 
-                    if (_clientJob.Client != Worker.None && _clientJob.Client != Worker.BenchmarkDotNet && _clientJob.Warmup != 0)
+                    // Reset this before each iteration
+                    _clientJob.SkipStartupLatencies = _noStartupLatencyOption.HasValue();
+
+                    if (!IsConsoleApp && _clientJob.Warmup != 0)
                     {
                         Log("Warmup");
                         var duration = _clientJob.Duration;
 
                         _clientJob.Duration = _clientJob.Warmup;
-                        clientJob = await RunClientJob(scenario, clientUri, serverJobUri, serverBenchmarkUri, scriptFileOption);
+
+                        if (clientUris.Any())
+                        {
+                            // Warmup using the first client
+                            clientJobs = new[] { await RunClientJob(scenario, clientUris[0], serverJobUri, serverBenchmarkUri, scriptFileOption) };
+                        }
 
                         // Store the latency as measured on the warmup job
-                        latencyNoLoad = clientJob.LatencyNoLoad;
-                        latencyFirstRequest = clientJob.LatencyFirstRequest;
-                        _clientJob.SkipStartupLatencies = false;
+                        // The first client is used to measure the latencies
+                        latencyNoLoad = clientJobs[0].LatencyNoLoad;
+                        latencyFirstRequest = clientJobs[0].LatencyFirstRequest;
 
                         _clientJob.Duration = duration;
                         System.Threading.Thread.Sleep(200);  // Make it clear on traces when warmup stops and measuring begins.
                     }
 
+                    // Prevent the actual run from updating the startup statistics
+                    _clientJob.SkipStartupLatencies = true;
 
                     var startTime = DateTime.UtcNow;
                     var spanLoop = 0;
@@ -1136,22 +1585,21 @@ namespace BenchmarksDriver
                         }
 
                         // Don't run the client job for None and BenchmarkDotNet
-                        if (_clientJob.Client != Worker.None && _clientJob.Client != Worker.BenchmarkDotNet)
+                        if (!IsConsoleApp)
                         {
-                            clientJob = await RunClientJob(scenario, clientUri, serverJobUri, serverBenchmarkUri, scriptFileOption);
+                            var tasks = clientUris.Select(clientUri => RunClientJob(scenario, clientUri, serverJobUri, serverBenchmarkUri, scriptFileOption)).ToArray();
+                            await Task.WhenAll(tasks);
+                            clientJobs = tasks.Select(x => x.Result).ToArray();
                         }
                         else
                         {
                             // Don't wait for the client job as we are not starting it
-                            clientJob = new ClientJob
-                            {
-                                State = ClientState.Completed
-                            };
+                            clientJobs = new[] { new ClientJob { State = ClientState.Completed } };
 
                             // Wait until the server has stopped
                             var now = DateTime.UtcNow;
-                            
-                            while(serverJob.State != ServerState.Stopped && (DateTime.UtcNow - now < _timeout))
+
+                            while (serverJob.State != ServerState.Stopped && (DateTime.UtcNow - now < _timeout))
                             {
                                 // Load latest state of server job
                                 LogVerbose($"GET {serverJobUri}...");
@@ -1172,51 +1620,7 @@ namespace BenchmarksDriver
                                 // Try to extract BenchmarkDotNet statistics
                                 if (_clientJob.Client == Worker.BenchmarkDotNet)
                                 {
-                                    var benchmarkFile = $"BenchmarkDotNet.Artifacts/results/{_benchmarkdotnet}-report.csv";
-
-                                    Log($"Downloading file {benchmarkFile}");
-                                    var uri = serverJobUri + "/download?path=" + HttpUtility.UrlEncode(benchmarkFile);
-                                    LogVerbose("GET " + uri);
-
-                                    var filename = benchmarkFile;
-
-                                    try
-                                    {
-                                        var csvContent = await DownloadFileContent(uri, serverJobUri);
-
-                                        using (var sr = new StringReader(csvContent))
-                                        {
-                                            using (var csv = new CsvReader(sr))
-                                            {
-                                                csv.Configuration.RegisterClassMap<CsvResultMap>();
-                                                csv.Configuration.TypeConverterOptionsCache.AddOptions(typeof(double), new TypeConverterOptions { NumberStyle = NumberStyles.AllowThousands | NumberStyles.AllowDecimalPoint });
-
-                                                var benchmarkDotNetSerializer = serializer as BenchmarkDotNetSerializer;
-                                                benchmarkDotNetSerializer.CsvResults = csv.GetRecords<CsvResult>().ToList();
-                                            }
-                                        }
-                                    }
-                                    catch (Exception e)
-                                    {
-                                        Log($"Error while downloading file {benchmarkFile}, skipping ...");
-                                        LogVerbose(e.Message);
-                                    }
-
-                                    var markdownFile = $"BenchmarkDotNet.Artifacts/results/{_benchmarkdotnet}-report-github.md";
-
-                                    try
-                                    {
-                                        // Download markdown file for output
-                                        uri = serverJobUri + "/download?path=" + HttpUtility.UrlEncode(markdownFile);
-                                        QuietLog(await DownloadFileContent(uri, serverJobUri));
-                                    }
-                                    catch (Exception e)
-                                    {
-                                        Log($"Error while downloading file {markdownFile}, skipping ...");
-                                        LogVerbose(e.Message);
-                                    }                                 
-
-                                   
+                                    await BenchmarkDotNetUtils.DownloadResultFiles(serverJobUri, _httpClient, (BenchmarkDotNetSerializer)serializer);
                                 }
                             }
                             else
@@ -1229,19 +1633,14 @@ namespace BenchmarksDriver
 
                         }
 
-                        if (clientJob.State == ClientState.Completed && serverJob.State != ServerState.Failed)
+                        if (clientJobs.All(client => client.State == ClientState.Completed) && serverJob.State != ServerState.Failed)
                         {
-                            LogVerbose($"Client Job completed");
+                            LogVerbose($"Client Jobs completed");
 
                             if (span == TimeSpan.Zero && i == iterations && !String.IsNullOrEmpty(shutdownEndpoint))
                             {
                                 Log($"Invoking '{shutdownEndpoint}' on benchmarked application...");
                                 await InvokeApplicationEndpoint(serverJobUri, shutdownEndpoint);
-                            }
-
-                            if (_displayOutput)
-                            {
-                                Log(serverJob.Output, notime: true);
                             }
 
                             // Load latest state of server job
@@ -1261,10 +1660,10 @@ namespace BenchmarksDriver
                                 downloadFiles.Add("r2r." + serverJob.ProcessId);
                             }
 
-                            if (clientJob.Warmup == 0)
+                            if (clientJobs[0].Warmup == 0)
                             {
-                                latencyNoLoad = clientJob.LatencyNoLoad;
-                                latencyFirstRequest = clientJob.LatencyFirstRequest;
+                                latencyNoLoad = clientJobs[0].LatencyNoLoad;
+                                latencyFirstRequest = clientJobs[0].LatencyFirstRequest;
                             }
 
                             var serverCounters = serverJob.ServerCounters;
@@ -1273,25 +1672,39 @@ namespace BenchmarksDriver
 
                             var statistics = new Statistics
                             {
-                                RequestsPerSecond = clientJob.RequestsPerSecond,
-                                LatencyOnLoad = clientJob.Latency.Average,
+                                RequestsPerSecond = clientJobs.Sum(clientJob => clientJob.RequestsPerSecond),
+                                LatencyOnLoad = clientJobs.Average(clientJob => clientJob.Latency.Average),
                                 Cpu = cpu,
                                 WorkingSet = workingSet,
                                 StartupMain = serverJob.StartupMainMethod.TotalMilliseconds,
+                                BuildTime = serverJob.BuildTime.TotalMilliseconds,
+                                PublishedSize = serverJob.PublishedSize,
                                 FirstRequest = latencyFirstRequest.TotalMilliseconds,
                                 Latency = latencyNoLoad.TotalMilliseconds,
-                                SocketErrors = clientJob.SocketErrors,
-                                BadResponses = clientJob.BadResponses,
+                                SocketErrors = clientJobs.Sum(clientJob => clientJob.SocketErrors),
+                                BadResponses = clientJobs.Sum(clientJob => clientJob.BadResponses),
 
-                                LatencyAverage = clientJob.Latency.Average,
-                                Latency50Percentile = clientJob.Latency.Within50thPercentile,
-                                Latency75Percentile = clientJob.Latency.Within75thPercentile,
-                                Latency90Percentile = clientJob.Latency.Within90thPercentile,
-                                Latency99Percentile = clientJob.Latency.Within99thPercentile,
-                                MaxLatency = clientJob.Latency.MaxLatency,
-                                TotalRequests = clientJob.Requests,
-                                Duration = clientJob.ActualDuration.TotalMilliseconds
+                                LatencyAverage = clientJobs.Average(clientJob => clientJob.Latency.Average),
+                                Latency50Percentile = clientJobs.Average(clientJob => clientJob.Latency.Within50thPercentile),
+                                Latency75Percentile = clientJobs.Average(clientJob => clientJob.Latency.Within75thPercentile),
+                                Latency90Percentile = clientJobs.Average(clientJob => clientJob.Latency.Within90thPercentile),
+                                Latency99Percentile = clientJobs.Average(clientJob => clientJob.Latency.Within99thPercentile),
+                                MaxLatency = clientJobs.Average(clientJob => clientJob.Latency.MaxLatency),
+                                TotalRequests = clientJobs.Sum(clientJob => clientJob.Requests),
+                                Duration = clientJobs[0].ActualDuration.TotalMilliseconds
                             };
+
+                            foreach (var entry in serverJob.Counters)
+                            {
+                                statistics.Other[entry.Key] = entry.Value.Select(x => double.Parse(x)).Max();
+                                statistics.Samples[entry.Key] = entry.Value.Select(x => double.Parse(x)).ToArray();
+
+                                var knownCounter = Counters.FirstOrDefault(x => x.Name == entry.Key);
+                                if (knownCounter != null)
+                                {
+                                    statistics.Other[entry.Key] = knownCounter.Compute(entry.Value.Select(x => double.Parse(x)));
+                                }
+                            }
 
                             results.Add(statistics);
 
@@ -1310,6 +1723,8 @@ namespace BenchmarksDriver
                                     LogVerbose($"Latency on load (ms):        {statistics.LatencyOnLoad}");
                                     LogVerbose($"Startup Main (ms):           {statistics.StartupMain}");
                                     LogVerbose($"First Request (ms):          {statistics.FirstRequest}");
+                                    LogVerbose($"Build Time (ms):             {statistics.BuildTime}");
+                                    LogVerbose($"Published Size (KB):         {statistics.PublishedSize}");
                                 }
                             }
 
@@ -1320,19 +1735,18 @@ namespace BenchmarksDriver
 
                             rpsStr = "RPS-" + ((int)((statistics.RequestsPerSecond + 500) / 1000)) + "K";
 
+                            // EventPipe log
+                            if (_enableEventPipeOption.HasValue())
+                            {
+                                Log($"EventPipe config: {EventPipeConfig}");
+                            }
+
                             // Collect Trace
                             if (serverJob.Collect)
                             {
                                 Log($"Post-processing profiler trace, this can take 10s of seconds...");
 
-                                if (serverJob.OperatingSystem == Benchmarks.ServerJob.OperatingSystem.Windows)
-                                {
-                                    Log($"Trace arguments: {serverJob.CollectArguments}");
-                                }
-                                else
-                                {
-                                    Log($"EventPipe config: {DefaultEventPipeConfig}");
-                                }
+                                Log($"Trace arguments: {serverJob.CollectArguments}");
 
                                 var uri = serverJobUri + "/trace";
                                 response = await _httpClient.PostAsync(uri, new StringContent(""));
@@ -1380,9 +1794,15 @@ namespace BenchmarksDriver
                                     traceOutputFileName = traceOutputFileName + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + "." + rpsStr + traceExtension;
                                 }
 
-                                Log($"Downloading trace: {traceOutputFileName}");
-
-                                await DownloadFile(uri, serverJobUri, traceOutputFileName);
+                                try
+                                {
+                                    Log($"Downloading trace: {traceOutputFileName}");
+                                    await _httpClient.DownloadFileAsync(uri, serverJobUri, traceOutputFileName);
+                                }
+                                catch (HttpRequestException)
+                                {
+                                    Log($"FAILED: The trace was not successful");
+                                }
                             }
 
                             var shouldComputeResults = results.Any() && iterations == i && !IsConsoleApp;
@@ -1398,24 +1818,32 @@ namespace BenchmarksDriver
                                     Description = description,
 
                                     RequestsPerSecond = Math.Round(samples.Average(x => x.RequestsPerSecond)),
-                                    LatencyOnLoad = Math.Round(samples.Average(x => x.LatencyOnLoad), 1),
+                                    LatencyOnLoad = Math.Round(samples.Average(x => x.LatencyOnLoad), 2),
                                     Cpu = Math.Round(samples.Average(x => x.Cpu)),
                                     WorkingSet = Math.Round(samples.Average(x => x.WorkingSet)),
                                     StartupMain = Math.Round(samples.Average(x => x.StartupMain)),
-                                    FirstRequest = Math.Round(samples.Average(x => x.FirstRequest), 1),
+                                    BuildTime = Math.Round(samples.Average(x => x.BuildTime)),
+                                    PublishedSize = Math.Round(samples.Average(x => x.PublishedSize)),
+                                    FirstRequest = Math.Round(samples.Average(x => x.FirstRequest), 2),
                                     SocketErrors = Math.Round(samples.Average(x => x.SocketErrors)),
                                     BadResponses = Math.Round(samples.Average(x => x.BadResponses)),
 
-                                    Latency = Math.Round(samples.Average(x => x.Latency), 1),
-                                    LatencyAverage = Math.Round(samples.Average(x => x.LatencyAverage), 1),
-                                    Latency50Percentile = Math.Round(samples.Average(x => x.Latency50Percentile), 1),
-                                    Latency75Percentile = Math.Round(samples.Average(x => x.Latency75Percentile), 1),
-                                    Latency90Percentile = Math.Round(samples.Average(x => x.Latency90Percentile), 1),
-                                    Latency99Percentile = Math.Round(samples.Average(x => x.Latency99Percentile), 1),
-                                    MaxLatency = Math.Round(samples.Average(x => x.MaxLatency), 1),
+                                    Latency = Math.Round(samples.Average(x => x.Latency), 2),
+                                    LatencyAverage = Math.Round(samples.Average(x => x.LatencyAverage), 2),
+                                    Latency50Percentile = Math.Round(samples.Average(x => x.Latency50Percentile), 2),
+                                    Latency75Percentile = Math.Round(samples.Average(x => x.Latency75Percentile), 2),
+                                    Latency90Percentile = Math.Round(samples.Average(x => x.Latency90Percentile), 2),
+                                    Latency99Percentile = Math.Round(samples.Average(x => x.Latency99Percentile), 2),
+                                    MaxLatency = Math.Round(samples.Average(x => x.MaxLatency), 2),
                                     TotalRequests = Math.Round(samples.Average(x => x.TotalRequests)),
                                     Duration = Math.Round(samples.Average(x => x.Duration))
                                 };
+
+                                foreach (var counter in statistics.Other.Keys)
+                                {
+                                    average.Other[counter] = samples.Average(x => x.Other[counter]);
+                                    average.Samples[counter] = samples.Last().Samples[counter];
+                                }
 
                                 if (serializer != null)
                                 {
@@ -1453,6 +1881,35 @@ namespace BenchmarksDriver
                                     }
 
                                     File.AppendAllText(writeToFilename, values + "|" + Environment.NewLine);
+                                }
+
+
+                                // Render all results if --quiet not set
+                                if (iterations > 1 && !_quiet)
+                                {
+                                    QuietLog("All results:");
+
+                                    QuietLog(header + "|");
+                                    QuietLog(separator + "|");
+
+                                    foreach (var result in results)
+                                    {
+                                        var tmpDescription = result.Description;
+                                        result.Description = samples.Contains(result) ? "✓" : "✗";
+                                        var localFields = BuildFields(result);
+
+                                        var localValues = new StringBuilder();
+                                        foreach (var field in localFields)
+                                        {
+                                            var size = Math.Max(field.Key.Length, field.Value.Length);
+                                            localValues.Append("| ").Append(field.Value.PadLeft(size)).Append(" ");
+                                        }
+
+                                        result.Description = tmpDescription;
+                                        QuietLog(localValues + "|");
+                                    }
+
+                                    QuietLog("");
                                 }
 
                                 if (diffOption.HasValue())
@@ -1522,9 +1979,27 @@ namespace BenchmarksDriver
                                     QuietLog($"Duration: (ms)               {average.Duration:n0}");
                                     QuietLog($"Socket Errors:               {average.SocketErrors:n0}");
                                     QuietLog($"Bad Responses:               {average.BadResponses:n0}");
+                                    QuietLog($"Build Time (ms):             {average.BuildTime:n0}");
+                                    QuietLog($"Published Size (KB):         {average.PublishedSize:n0}");
                                     QuietLog($"SDK:                         {serverJob.SdkVersion}");
                                     QuietLog($"Runtime:                     {serverJob.RuntimeVersion}");
                                     QuietLog($"ASP.NET Core:                {serverJob.AspNetCoreVersion}");
+
+                                    if (average.Other.Any())
+                                    {
+                                        QuietLog("");
+                                        QuietLog("Counters:");
+
+                                        foreach (var counter in Counters)
+                                        {
+                                            if (!average.Other.ContainsKey(counter.Name))
+                                            {
+                                                continue;
+                                            }
+
+                                            QuietLog($"{(counter.DisplayName + ":").PadRight(29, ' ')}{average.Other[counter.Name].ToString(counter.Format)}");
+                                        }
+                                    }
                                 }
 
                                 if (saveOption.HasValue())
@@ -1549,7 +2024,7 @@ namespace BenchmarksDriver
                                 }
                             }
 
-                            if (serializer != null && !String.IsNullOrEmpty(sqlConnectionString))
+                            if (i == iterations && serializer != null && !String.IsNullOrEmpty(sqlConnectionString))
                             {
                                 sqlTask = sqlTask.ContinueWith(async t =>
                                 {
@@ -1558,7 +2033,7 @@ namespace BenchmarksDriver
                                     {
                                         await serializer.WriteJobResultsToSqlAsync(
                                             serverJob: serverJob,
-                                            clientJob: clientJob,
+                                            clientJob: clientJobs[0],
                                             connectionString: sqlConnectionString,
                                             tableName: _tableName,
                                             path: serverJob.Path,
@@ -1587,7 +2062,7 @@ namespace BenchmarksDriver
                         await sqlTask;
                     }
 
-                    Log($"Stopping scenario {scenario} on benchmark server...");
+                    Log($"Stopping scenario '{scenario}' on benchmark server...");
 
                     response = await _httpClient.PostAsync(serverJobUri + "/stop", new StringContent(""));
                     LogVerbose($"{(int)response.StatusCode} {response.StatusCode}");
@@ -1612,18 +2087,25 @@ namespace BenchmarksDriver
 
                         serverJob = JsonConvert.DeserializeObject<ServerJob>(responseContent);
 
-                        if (DateTime.UtcNow - jobStoppedUtc > TimeSpan.FromSeconds(10))
+                        if (DateTime.UtcNow - jobStoppedUtc > TimeSpan.FromSeconds(30))
                         {
                             // The job needs to be deleted
                             Log($"Server didn't stop the job in the expected time, deleting it ...");
+
+                            break;
                         }
 
                     } while (serverJob.State != ServerState.Stopped);
 
-                    // Download netperf file
-                    if (enableEventPipe && serverJob.OperatingSystem == Benchmarks.ServerJob.OperatingSystem.Linux)
+                    if (_displayOutput)
                     {
-                        var uri = serverJobUri + "/download?path=" + HttpUtility.UrlEncode(EventPipeOutputFile);
+                        DisplayOutput(serverJob);
+                    }
+
+                    // Download netperf file
+                    if (_enableEventPipeOption.HasValue())
+                    {
+                        var uri = serverJobUri + "/eventpipe";
                         LogVerbose("GET " + uri);
 
                         try
@@ -1635,64 +2117,15 @@ namespace BenchmarksDriver
                             }
 
                             Log($"Downloading trace: {traceOutputFileName}");
-                            await DownloadFile(uri, serverJobUri, traceOutputFileName);
+                            await _httpClient.DownloadFileAsync(uri, serverJobUri, traceOutputFileName);
                         }
                         catch (Exception e)
                         {
-                            Log($"Error while downloading trace file {EventPipeOutputFile}");
+                            Log($"Error while downloading EventPipe file {EventPipeOutputFile}");
                             LogVerbose(e.Message);
-                            continue;
                         }
                     }
 
-                    // Download published application
-                    if (fetch)
-                    {
-                        Log($"Downloading published application...");
-                        if (fetchDestination == null || !fetchDestination.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                        {
-                            // If it does not end with a *.zip then we add a DATE.zip to it
-                            if (String.IsNullOrEmpty(fetchDestination))
-                            {
-                                fetchDestination = "published";
-                            }
-
-                            fetchDestination = fetchDestination + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + ".zip";
-                        }
-
-                        var uri = serverJobUri + "/fetch";
-                        Log($"Creating published archive: {fetchDestination}");
-                        await File.WriteAllBytesAsync(fetchDestination, await _httpClient.GetByteArrayAsync(uri));
-                    }
-
-                    // Download files
-                    if (downloadFiles != null && downloadFiles.Any())
-                    {
-                        foreach (var file in downloadFiles)
-                        {
-                            Log($"Downloading file {file}");
-                            var uri = serverJobUri + "/download?path=" + HttpUtility.UrlEncode(file);
-                            LogVerbose("GET " + uri);
-
-                            try
-                            {
-                                var filename = file;
-                                var counter = 1;
-                                while (File.Exists(filename))
-                                {
-                                    filename = Path.GetFileNameWithoutExtension(file) + counter++ + Path.GetExtension(file);
-                                }
-
-                                await DownloadFile(uri, serverJobUri, filename);
-                            }
-                            catch (Exception e)
-                            {
-                                Log($"Error while downloading file {file}, skipping ...");
-                                LogVerbose(e.Message);
-                                continue;
-                            }
-                        }
-                    }
                 }
                 catch (Exception e)
                 {
@@ -1705,7 +2138,64 @@ namespace BenchmarksDriver
                 {
                     if (serverJobUri != null)
                     {
-                        Log($"Deleting scenario {scenario} on benchmark server...");
+                        // Download published application
+                        if (fetch)
+                        {
+                            try
+                            {
+                                Log($"Downloading published application...");
+                                if (fetchDestination == null || !fetchDestination.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    // If it does not end with a *.zip then we add a DATE.zip to it
+                                    if (String.IsNullOrEmpty(fetchDestination))
+                                    {
+                                        fetchDestination = "published";
+                                    }
+
+                                    fetchDestination = fetchDestination + "." + DateTime.Now.ToString("MM-dd-HH-mm-ss") + ".zip";
+                                }
+
+                                var uri = serverJobUri + "/fetch";
+                                Log($"Creating published archive: {fetchDestination}");
+                                await File.WriteAllBytesAsync(fetchDestination, await _httpClient.GetByteArrayAsync(uri));
+                            }
+                            catch (Exception e)
+                            {
+                                Log($"Error while downloading published application");
+                                LogVerbose(e.Message);
+                            }
+                        }
+
+                        // Download files
+                        if (downloadFiles != null && downloadFiles.Any())
+                        {
+                            foreach (var file in downloadFiles)
+                            {
+                                Log($"Downloading file {file}");
+                                var uri = serverJobUri + "/download?path=" + HttpUtility.UrlEncode(file);
+                                LogVerbose("GET " + uri);
+
+                                try
+                                {
+                                    var filename = file;
+                                    var counter = 1;
+                                    while (File.Exists(filename))
+                                    {
+                                        filename = Path.GetFileNameWithoutExtension(file) + counter++ + Path.GetExtension(file);
+                                    }
+
+                                    await _httpClient.DownloadFileAsync(uri, serverJobUri, filename);
+                                }
+                                catch (Exception e)
+                                {
+                                    Log($"Error while downloading file {file}, skipping ...");
+                                    LogVerbose(e.Message);
+                                    continue;
+                                }
+                            }
+                        }
+
+                        Log($"Deleting scenario '{scenario}' on benchmark server...");
 
                         LogVerbose($"DELETE {serverJobUri}...");
                         response = await _httpClient.DeleteAsync(serverJobUri);
@@ -1729,23 +2219,58 @@ namespace BenchmarksDriver
             return 0;
         }
 
-        private static List<KeyValuePair<string, string>> BuildFields(Statistics average)
+        private static void DisplayOutput(ServerJob serverJob)
         {
-            var fields = new List<KeyValuePair<string, string>>();
-            if (!String.IsNullOrEmpty(average.Description))
+            #region Switching console mode on Windows to preserve colors for stdout
+
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                fields.Add(new KeyValuePair<string, string>("Description", average.Description));
+                var iStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
+                if (!GetConsoleMode(iStdOut, out uint outConsoleMode))
+                {
+                    Console.WriteLine("failed to get output console mode");
+                }
+
+                var tempConsoleMode = outConsoleMode;
+
+                outConsoleMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN;
+                if (!SetConsoleMode(iStdOut, outConsoleMode))
+                {
+                    Console.WriteLine($"failed to set output console mode, error code: {GetLastError()}");
+                }
+
+                if (!SetConsoleMode(iStdOut, tempConsoleMode))
+                {
+                    Console.WriteLine($"failed to restore console mode, error code: {GetLastError()}");
+                }
             }
 
-            fields.Add(new KeyValuePair<string, string>("RPS", $"{average.RequestsPerSecond:n0}"));
-            fields.Add(new KeyValuePair<string, string>("CPU (%)", $"{average.Cpu}"));
-            fields.Add(new KeyValuePair<string, string>("Memory (MB)", $"{average.WorkingSet:n0}"));
-            fields.Add(new KeyValuePair<string, string>("Avg. Latency (ms)", $"{average.LatencyOnLoad}"));
-            fields.Add(new KeyValuePair<string, string>("Startup (ms)", $"{average.StartupMain}"));
-            fields.Add(new KeyValuePair<string, string>("First Request (ms)", $"{average.FirstRequest}"));
-            fields.Add(new KeyValuePair<string, string>("Latency (ms)", $"{average.Latency}"));
-            return fields;
+            #endregion
+
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                // Convert LF
+                serverJob.Output = serverJob.Output?.Replace("\n", Environment.NewLine) ?? "";
+            }
+
+            Log(serverJob.Output, notime: true);
         }
+
+        private static List<KeyValuePair<string, string>> BuildFields(Statistics average)
+            => new List<KeyValuePair<string, string>>
+            {
+                new KeyValuePair<string, string>("Description", average.Description),
+                new KeyValuePair<string, string>("RPS", $"{average.RequestsPerSecond:n0}"),
+                new KeyValuePair<string, string>("CPU (%)", $"{average.Cpu}"),
+                new KeyValuePair<string, string>("Memory (MB)", $"{average.WorkingSet:n0}"),
+                new KeyValuePair<string, string>("Avg. Latency (ms)", $"{average.LatencyOnLoad}"),
+                new KeyValuePair<string, string>("Startup (ms)", $"{average.StartupMain}"),
+                new KeyValuePair<string, string>("Build Time (ms)", $"{average.BuildTime}"),
+                new KeyValuePair<string, string>("Published Size (KB)", $"{average.PublishedSize}"),
+                new KeyValuePair<string, string>("First Request (ms)", $"{average.FirstRequest}"),
+                new KeyValuePair<string, string>("Latency (ms)", $"{average.Latency}"),
+                new KeyValuePair<string, string>("Errors", $"{average.SocketErrors + average.BadResponses}"),
+            };
 
         private static async Task<int> UploadFileAsync(string filename, ServerJob serverJob, string uri)
         {
@@ -1850,7 +2375,7 @@ namespace BenchmarksDriver
                     allWrkScripts.AddRange(scriptFileOption.Values);
                 }
 
-                if (clientJob.Client == Worker.Wrk && clientJob.ClientProperties.ContainsKey("Scripts"))
+                if ((clientJob.Client == Worker.Wrk || clientJob.Client == Worker.Wrk2) && clientJob.ClientProperties.ContainsKey("Scripts"))
                 {
                     allWrkScripts.AddRange(clientJob.ClientProperties["Scripts"].Split(';'));
                 }
@@ -1889,8 +2414,10 @@ namespace BenchmarksDriver
                         LogVerbose($"{(int)response.StatusCode} {response.StatusCode} {responseContent}");
                     }, 1000);
 
-                    if (response.StatusCode == HttpStatusCode.NotFound)
+                    if (!response.IsSuccessStatusCode)
                     {
+                        responseContent = await response.Content.ReadAsStringAsync();
+                        Log(responseContent);
                         Log($"Job halted by the client");
                         break;
                     }
@@ -1973,37 +2500,36 @@ namespace BenchmarksDriver
             return clientJob;
         }
 
-        private static async Task DownloadFile(string uri, Uri serverJobUri, string destinationFileName)
+        private static string _filecache = null;
+
+        private static async Task<string> DownloadTemporaryFileAsync(string uri, Uri serverJobUri)
         {
-            using (var downloadStream = await _httpClient.GetStreamAsync(uri))
+            if (_filecache == null)
             {
-                using (var fileStream = File.Create(destinationFileName))
-                {
-                    var downloadTask = downloadStream.CopyToAsync(fileStream);
-
-                    while (!downloadTask.IsCompleted)
-                    {
-                        // Ping server job to keep it alive while downloading the file
-                        LogVerbose($"GET {serverJobUri}/touch...");
-                        var response = await _httpClient.GetAsync(serverJobUri + "/touch");
-
-                        await Task.Delay(1000);
-                    }
-
-                    await downloadTask;
-                }
+                _filecache = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
             }
 
-            return;
+            Directory.CreateDirectory(_filecache);
+
+            _temporaryFolders.Add(_filecache);
+
+            var filehashname = Path.Combine(_filecache, uri.GetHashCode().ToString());
+
+            if (!File.Exists(filehashname))
+            {
+                await _httpClient.DownloadFileAsync(uri, serverJobUri, filehashname);
+            }
+
+            return filehashname;
         }
 
-        private static async Task<string> DownloadFileContent(string uri, Uri serverJobUri)
+        private static void CleanTemporaryFiles()
         {
-            using (var downloadStream = await _httpClient.GetStreamAsync(uri))
+            foreach (var temporaryFolder in _temporaryFolders)
             {
-                using (var stringReader = new StreamReader(downloadStream))
+                if (temporaryFolder != null && Directory.Exists(temporaryFolder))
                 {
-                    return await stringReader.ReadToEndAsync();
+                    Directory.Delete(temporaryFolder, true);
                 }
             }
         }
@@ -2016,11 +2542,16 @@ namespace BenchmarksDriver
 
         private static void QuietLog(string message)
         {
-              Console.WriteLine(message);
+            Console.WriteLine(message);
         }
 
-        private static void Log(string message, bool notime = false)
+        internal static void Log(string message, bool notime = false, bool error = false)
         {
+            if (error)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+            }
+
             if (!_quiet)
             {
                 var time = DateTime.Now.ToString("hh:mm:ss.fff");
@@ -2033,9 +2564,11 @@ namespace BenchmarksDriver
                     Console.WriteLine($"[{time}] {message}");
                 }
             }
+
+            Console.ResetColor();
         }
 
-        private static void LogVerbose(string message)
+        internal static void LogVerbose(string message)
         {
             if (_verbose && !_quiet)
             {
@@ -2074,19 +2607,26 @@ namespace BenchmarksDriver
         private static void DoCreateFromDirectory(string sourceDirectoryName, string destinationArchiveFileName)
         {
             sourceDirectoryName = Path.GetFullPath(sourceDirectoryName);
+
+            // We ensure the name ends with '\' or '/'
+            if (!sourceDirectoryName.EndsWith(Path.AltDirectorySeparatorChar))
+            {
+                sourceDirectoryName += Path.AltDirectorySeparatorChar;
+            }
+
             destinationArchiveFileName = Path.GetFullPath(destinationArchiveFileName);
 
             DirectoryInfo di = new DirectoryInfo(sourceDirectoryName);
 
             using (ZipArchive archive = ZipFile.Open(destinationArchiveFileName, ZipArchiveMode.Create))
             {
-                string basePath = di.FullName;
+                var basePath = di.FullName;
 
                 var ignoreFile = IgnoreFile.Parse(Path.Combine(sourceDirectoryName, ".gitignore"));
 
                 foreach (var gitFile in ignoreFile.ListDirectory(sourceDirectoryName))
                 {
-                    var localPath = gitFile.Path.Substring(sourceDirectoryName.Length + 1);
+                    var localPath = gitFile.Path.Substring(sourceDirectoryName.Length);
                     LogVerbose($"Adding {localPath}");
                     var entry = archive.CreateEntryFromFile(gitFile.Path, localPath);
                 }
@@ -2099,21 +2639,64 @@ namespace BenchmarksDriver
 
             var result = new Dictionary<string, string>(segments.Length);
 
-            foreach(var segment in segments)
+            foreach (var segment in segments)
             {
-                var values = segment.Split('=');
+                var values = segment.Split('=', 2);
 
-                if (values.Length != 2)
+                var key = values[0].Trim();
+
+                // GCCollectOnly
+                if (values.Length == 1)
                 {
-                    continue;
+                    result[key] = "";
                 }
+                else
+                {
+                    var value = values[1].Trim();
 
-                result[values[0].Trim()] = values[1].Trim();
+                    if (String.IsNullOrWhiteSpace(value))
+                    {
+                        result[key] = null;
+                    }
+                    else
+                    {
+                        result[key] = value;
+                    }
+                }
             }
 
             return result;
         }
 
+        // ANSI Console mode support
         private static bool IsConsoleApp => _clientJob.Client == Worker.None || _clientJob.Client == Worker.BenchmarkDotNet;
+
+        private const int STD_OUTPUT_HANDLE = -11;
+        private const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
+        private const uint DISABLE_NEWLINE_AUTO_RETURN = 0x0008;
+
+        [DllImport("kernel32.dll")]
+        private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetStdHandle(int nStdHandle);
+
+        [DllImport("kernel32.dll")]
+        public static extern uint GetLastError();
+
+        private static Func<IEnumerable<double>, double> Percentile(int percentile)
+        {
+            return list =>
+            {
+                var orderedList = list.OrderBy(x => x).ToArray();
+
+                var nth = (int)Math.Ceiling((double)orderedList.Length * percentile / 100);
+
+                return orderedList[nth];
+            };
+        }
     }
 }

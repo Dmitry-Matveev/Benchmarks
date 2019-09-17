@@ -8,9 +8,14 @@ function readData(filename)
 end
 
 function init(args)
+   local data = readData("scripts/data.txt")
+   local contentLength = string.len(data)
+
+   print("Reading data file: " .. contentLength .. " bytes" )
    wrk.method = "POST"
-   wrk.body = readData("scripts/data.txt")
+   wrk.body = data
    wrk.headers["Content-Type"] = "text/plain"
+   wrk.headers["Content-Length"] = contentLength
 
    if args[1] ~= nil then
       pipelineDepth = args[1]

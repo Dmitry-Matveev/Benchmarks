@@ -16,12 +16,6 @@ then
     exit 1
 fi
 
-if [ -z "$PLAINTEXT_LIBUV_THREAD_COUNT" ]
-then
-    echo "\$PLAINTEXT_LIBUV_THREAD_COUNT is not set"
-    exit 1
-fi
-
 # compute current directory
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ROOT=$DIR/..
@@ -29,7 +23,7 @@ ROOT=$DIR/..
 common="--description TechEmpower --webHost Docker -t TechEmpower"
 actixJobs="$common -j $ROOT/src/Benchmarks/benchmarks.te.actix.json"
 aspnetcoreJobs="$common -j $ROOT/src/Benchmarks/benchmarks.te.aspnetcore.json"
-aspnetcore21Jobs="$common -j $ROOT/src/Benchmarks/benchmarks.te.aspnetcore21.json"
+aspnetcoreMiddlewareJobs="$common -j $ROOT/src/Benchmarks/benchmarks.te.aspnetcore-mw.json"
 nettyJobs="$common -j $ROOT/src/Benchmarks/benchmarks.te.netty.json"
 nodejsJobs="$common -j $ROOT/src/Benchmarks/benchmarks.te.nodejs.json"
 undertowJobs="$common -j $ROOT/src/Benchmarks/benchmarks.te.undertow.json"
@@ -54,11 +48,11 @@ jobs=(
   "-n Json-AspNetCore $aspnetcoreJobs"
   "-n FortunesPostgreSql-AspNetCore $aspnetcoreJobs"
 
-    # AspNetCore21
-  "-n Plaintext-AspNetCore21 $aspnetcore21Jobs"
-  "-n PlaintextNonPipelined-AspNetCore21 $aspnetcore21Jobs"
-  "-n Json-AspNetCore21 $aspnetcore21Jobs"
-  "-n FortunesPostgreSql-AspNetCore21 $aspnetcore21Jobs"
+  # AspNetCore Middleware
+  "-n Plaintext-AspNetCoreMiddleware $aspnetcoreMiddlewareJobs"
+  "-n PlaintextNonPipelined-AspNetCoreMiddleware $aspnetcoreMiddlewareJobs"
+  "-n Json-AspNetCoreMiddleware $aspnetcoreMiddlewareJobs"
+  "-n FortunesPostgreSql-AspNetCoreMiddleware $aspnetcoreMiddlewareJobs"
 
   # Actix
   "-n Plaintext-Actix $actixJobs"

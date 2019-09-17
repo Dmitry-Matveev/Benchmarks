@@ -17,8 +17,14 @@ namespace BenchmarksDriver.Serializers
             // Wrk
             ResultSerializers[Worker.Wrk] = () => new WrkSerializer();
 
+            // Wrk2 - Same as Wrk
+            ResultSerializers[Worker.Wrk2] = () => new WrkSerializer();
+
             // SignalR
             ResultSerializers[Worker.SignalR] = () => new SignalRSerializer();
+
+            // Grpc
+            ResultSerializers[Worker.Grpc] = () => new GrpcSerializer();
 
             // Wait
             ResultSerializers[Worker.Wait] = () => new WaitSerializer();
@@ -28,6 +34,9 @@ namespace BenchmarksDriver.Serializers
 
             // BenchmarkDotNet
             ResultSerializers[Worker.BenchmarkDotNet] = () => new BenchmarkDotNetSerializer();
+
+            // Bombardier
+            ResultSerializers[Worker.Bombardier] = () => new WrkSerializer();
         }
 
         static public IResultsSerializer CreateResultSerializer(ClientJob clientJob)

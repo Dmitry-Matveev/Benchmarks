@@ -3,8 +3,8 @@
     "Source": {
       "Repository": "https://github.com/TechEmpower/FrameworkBenchmarks.git",
       "BranchOrCommit": "master",
-      "DockerFile": "frameworks/Rust/actix/actix.dockerfile",
-      "DockerImageName": "actix",
+      "DockerFile": "frameworks/Rust/actix/actix-raw.dockerfile",
+      "DockerImageName": "actix_raw",
       "DockerContextDirectory": "frameworks/Rust/actix/"
     },
     "Client": "Wrk",

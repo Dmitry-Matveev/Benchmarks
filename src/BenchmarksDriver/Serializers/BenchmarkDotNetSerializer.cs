@@ -16,7 +16,7 @@ namespace BenchmarksDriver.Serializers
     {
         public string JobLogText { get; set; }
 
-        public IEnumerable<CsvResult> CsvResults { get; set; }
+        public List<CsvResult> CsvResults { get; set; } = new List<CsvResult>();
 
         private static void Log(string message)
         {
@@ -41,7 +41,7 @@ namespace BenchmarksDriver.Serializers
 
             foreach (var result in CsvResults)
             {
-                serverJob.Scenario = $"{scenario}.{result.Method}";
+                serverJob.Scenario = $"{scenario}.{result.Class}.{result.Method}{result.Params ?? ""}";
 
                 await WriteJobsToSql(
                     serverJob: serverJob,
@@ -88,7 +88,6 @@ namespace BenchmarksDriver.Serializers
                     operatingSystem: serverJob.OperatingSystem.Value,
                     scheme: serverJob.Scheme,
                     source: serverJob.Source,
-                    connectionFilter: serverJob.ConnectionFilter,
                     webHost: serverJob.WebHost,
                     kestrelThreadCount: serverJob.KestrelThreadCount,
                     clientThreads: clientJob.Threads,
@@ -118,14 +117,13 @@ namespace BenchmarksDriver.Serializers
                         [Description] [nvarchar](200),
                         [AspNetCoreVersion] [nvarchar](50) NOT NULL,
                         [RuntimeVersion] [nvarchar](50) NOT NULL,
-                        [Scenario] [nvarchar](50) NOT NULL,
+                        [Scenario] [nvarchar](200) NOT NULL,
                         [Hardware] [nvarchar](50) NOT NULL,
                         [HardwareVersion] [nvarchar](128) NOT NULL,
                         [OperatingSystem] [nvarchar](50) NOT NULL,
                         [Framework] [nvarchar](50) NOT NULL,
                         [RuntimeStore] [bit] NOT NULL,
                         [Scheme] [nvarchar](50) NOT NULL,
-                        [ConnectionFilter] [nvarchar](50) NULL,
                         [WebHost] [nvarchar](50) NOT NULL,
                         [KestrelThreadCount] [int] NULL,
                         [ClientThreads] [int] NOT NULL,
@@ -166,7 +164,6 @@ namespace BenchmarksDriver.Serializers
             Benchmarks.ServerJob.OperatingSystem operatingSystem,
             Scheme scheme,
             Source source,
-            string connectionFilter,
             WebHost webHost,
             int? kestrelThreadCount,
             int clientThreads,
@@ -196,7 +193,6 @@ namespace BenchmarksDriver.Serializers
                            ,[Framework]
                            ,[RuntimeStore]
                            ,[Scheme]
-                           ,[ConnectionFilter]
                            ,[WebHost]
                            ,[KestrelThreadCount]
                            ,[ClientThreads]
@@ -221,7 +217,6 @@ namespace BenchmarksDriver.Serializers
                            ,@Framework
                            ,@RuntimeStore
                            ,@Scheme
-                           ,@ConnectionFilter
                            ,@WebHost
                            ,@KestrelThreadCount
                            ,@ClientThreads
@@ -256,8 +251,6 @@ namespace BenchmarksDriver.Serializers
                     p.AddWithValue("@Framework", "Core");
                     p.AddWithValue("@RuntimeStore", runtimeStore);
                     p.AddWithValue("@Scheme", scheme.ToString().ToLowerInvariant());
-                    p.AddWithValue("@ConnectionFilter",
-                        string.IsNullOrEmpty(connectionFilter) ? (object)DBNull.Value : connectionFilter);
                     p.AddWithValue("@WebHost", webHost.ToString());
                     p.AddWithValue("@KestrelThreadCount", (object)kestrelThreadCount ?? DBNull.Value);
                     p.AddWithValue("@ClientThreads", clientThreads);

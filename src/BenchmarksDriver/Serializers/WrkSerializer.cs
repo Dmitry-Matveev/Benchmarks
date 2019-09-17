@@ -14,14 +14,6 @@ namespace BenchmarksDriver.Serializers
 {
     public class WrkSerializer : IResultsSerializer
     {
-        public string JobLogText { get; set; }
-
-        private static void Log(string message)
-        {
-            var time = DateTime.Now.ToString("hh:mm:ss.fff");
-            Console.WriteLine($"[{time}] {message}");
-        }
-
         public async Task WriteJobResultsToSqlAsync(
             ServerJob serverJob, 
             ClientJob clientJob, 
@@ -60,6 +52,36 @@ namespace BenchmarksDriver.Serializers
                 description: description,
                 dimension: "Startup Main (ms)",
                 value: statistics.StartupMain);
+            }
+
+            if (statistics.BuildTime != -1 && !longRunning)
+            {
+                await WriteJobsToSql(
+                serverJob: serverJob,
+                clientJob: clientJob,
+                utcNow: utcNow,
+                connectionString: sqlConnectionString,
+                tableName: tableName,
+                path: serverJob.Path,
+                session: session,
+                description: description,
+                dimension: "Build Time (ms)",
+                value: statistics.BuildTime);
+            }
+
+            if (statistics.PublishedSize != -1 && !longRunning)
+            {
+                await WriteJobsToSql(
+                serverJob: serverJob,
+                clientJob: clientJob,
+                utcNow: utcNow,
+                connectionString: sqlConnectionString,
+                tableName: tableName,
+                path: serverJob.Path,
+                session: session,
+                description: description,
+                dimension: "Published Size (KB)",
+                value: statistics.PublishedSize);
             }
 
             if (statistics.FirstRequest != -1 && !longRunning)
@@ -265,6 +287,32 @@ namespace BenchmarksDriver.Serializers
                 dimension: "Duration (ms)",
                 value: statistics.Duration);
             }
+
+            if (statistics.Other.Any())
+            {
+                foreach (var counter in Program.Counters)
+                {
+                    if (!statistics.Other.ContainsKey(counter.Name))
+                    {
+                        continue;
+                    }
+
+                    if (statistics.Other[counter.Name] != -1)
+                    {
+                        await WriteJobsToSql(
+                        serverJob: serverJob,
+                        clientJob: clientJob,
+                        utcNow: utcNow,
+                        connectionString: sqlConnectionString,
+                        tableName: tableName,
+                        path: serverJob.Path,
+                        session: session,
+                        description: description,
+                        dimension: counter.DisplayName,
+                        value: statistics.Other[counter.Name]);
+                    }
+                }
+            }
         }
 
         private Task WriteJobsToSql(ServerJob serverJob, ClientJob clientJob, DateTime utcNow, string connectionString, string tableName, string path, string session, string description, string dimension, double value)
@@ -284,7 +332,6 @@ namespace BenchmarksDriver.Serializers
                     operatingSystem: serverJob.OperatingSystem.Value,
                     scheme: serverJob.Scheme,
                     source: serverJob.Source,
-                    connectionFilter: serverJob.ConnectionFilter,
                     webHost: serverJob.WebHost,
                     kestrelThreadCount: serverJob.KestrelThreadCount,
                     clientThreads: clientJob.Threads,
@@ -314,14 +361,13 @@ namespace BenchmarksDriver.Serializers
                         [Description] [nvarchar](200),
                         [AspNetCoreVersion] [nvarchar](50) NOT NULL,
                         [RuntimeVersion] [nvarchar](50) NOT NULL,
-                        [Scenario] [nvarchar](50) NOT NULL,
+                        [Scenario] [nvarchar](200) NOT NULL,
                         [Hardware] [nvarchar](50) NOT NULL,
                         [HardwareVersion] [nvarchar](128) NOT NULL,
                         [OperatingSystem] [nvarchar](50) NOT NULL,
                         [Framework] [nvarchar](50) NOT NULL,
                         [RuntimeStore] [bit] NOT NULL,
                         [Scheme] [nvarchar](50) NOT NULL,
-                        [ConnectionFilter] [nvarchar](50) NULL,
                         [WebHost] [nvarchar](50) NOT NULL,
                         [KestrelThreadCount] [int] NULL,
                         [ClientThreads] [int] NOT NULL,
@@ -362,7 +408,6 @@ namespace BenchmarksDriver.Serializers
             Benchmarks.ServerJob.OperatingSystem operatingSystem,
             Scheme scheme,
             Source source,
-            string connectionFilter,
             WebHost webHost,
             int? kestrelThreadCount,
             int clientThreads,
@@ -392,7 +437,6 @@ namespace BenchmarksDriver.Serializers
                            ,[Framework]
                            ,[RuntimeStore]
                            ,[Scheme]
-                           ,[ConnectionFilter]
                            ,[WebHost]
                            ,[KestrelThreadCount]
                            ,[ClientThreads]
@@ -417,7 +461,6 @@ namespace BenchmarksDriver.Serializers
                            ,@Framework
                            ,@RuntimeStore
                            ,@Scheme
-                           ,@ConnectionFilter
                            ,@WebHost
                            ,@KestrelThreadCount
                            ,@ClientThreads
@@ -452,8 +495,6 @@ namespace BenchmarksDriver.Serializers
                     p.AddWithValue("@Framework", "Core");
                     p.AddWithValue("@RuntimeStore", runtimeStore);
                     p.AddWithValue("@Scheme", scheme.ToString().ToLowerInvariant());
-                    p.AddWithValue("@ConnectionFilter",
-                        string.IsNullOrEmpty(connectionFilter) ? (object)DBNull.Value : connectionFilter);
                     p.AddWithValue("@WebHost", webHost.ToString());
                     p.AddWithValue("@KestrelThreadCount", (object)kestrelThreadCount ?? DBNull.Value);
                     p.AddWithValue("@ClientThreads", clientThreads);
@@ -479,33 +520,6 @@ namespace BenchmarksDriver.Serializers
                 {
                     transaction.Dispose();
                 }
-            }
-        }
-
-        private static string ConvertToSqlString(Source source)
-        {
-            const string aspnetPrefix = "https://github.com/aspnet/";
-            const string gitSuffix = ".git";
-
-            var shortRepository = source.Repository;
-
-            if (shortRepository.StartsWith(aspnetPrefix))
-            {
-                shortRepository = shortRepository.Substring(aspnetPrefix.Length);
-            }
-
-            if (shortRepository.EndsWith(gitSuffix))
-            {
-                shortRepository = shortRepository.Substring(0, shortRepository.Length - gitSuffix.Length);
-            }
-
-            if (string.IsNullOrEmpty(source.BranchOrCommit))
-            {
-                return shortRepository;
-            }
-            else
-            {
-                return shortRepository + "@" + source.BranchOrCommit;
             }
         }
 
@@ -544,6 +558,12 @@ namespace BenchmarksDriver.Serializers
         public void ComputeAverages(Statistics average, IEnumerable<Statistics> samples)
         {
             // No custom values
+        }
+
+        private static void Log(string message)
+        {
+            var time = DateTime.Now.ToString("hh:mm:ss.fff");
+            Console.WriteLine($"[{time}] {message}");
         }
     }
 }

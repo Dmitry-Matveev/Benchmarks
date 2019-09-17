@@ -6,6 +6,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
@@ -16,7 +17,9 @@ namespace BenchmarksBot
 {
     class Program
     {
-        static readonly string _aspNetCoreUrlPrevix = "https://dotnet.myget.org/F/aspnetcore-dev/api/v2/package/Microsoft.AspNetCore.App/";
+        const string AspNetCorePackage = "Microsoft.AspNetCore.Server.Kestrel.Transport.Libuv";
+        // package-id-lower, version
+        static readonly string _aspNetCorePackageFormat = "https://dotnetfeed.blob.core.windows.net/aspnet-aspnetcore/flatcontainer/{0}/{1}/{0}.{1}.nupkg";
         static readonly string _netCoreUrlPrevix = "https://dotnetcli.azureedge.net/dotnet/Runtime/{0}/dotnet-runtime-{0}-win-x64.zip";
         static readonly HttpClient _httpClient = new HttpClient();
 
@@ -26,6 +29,9 @@ namespace BenchmarksBot
         static string _username;
         static string _connectionString;
         static HashSet<string> _ignoredScenarios;
+        static string _tableName;
+
+        static IReadOnlyList<Issue> _recentIssues;
 
         static async Task Main(string[] args)
         {
@@ -36,13 +42,15 @@ namespace BenchmarksBot
 
             LoadSettings(config);
 
+            // Regresions
+
             Console.WriteLine("Looking for regressions...");
 
             var regressions = await FindRegression();
 
             Console.WriteLine("Excluding the ones already reported...");
 
-            var newRegressions = await RemoveReportedRegressions(regressions);
+            var newRegressions = await RemoveReportedRegressions(regressions, false, r => r.DateTimeUtc.ToString("u"));
 
             await PopulateHashes(newRegressions);
 
@@ -50,11 +58,54 @@ namespace BenchmarksBot
             {
                 Console.WriteLine("Reporting new regressions...");
 
-                await CreateIssue(newRegressions);
+                await CreateRegressionIssue(newRegressions);
             }
             else
             {
                 Console.WriteLine("No new regressions where found.");
+            }
+
+            // Not running
+
+            Console.WriteLine("Looking for scnearios that are not running...");
+
+            var notRunning = await FindNotRunning();
+
+            Console.WriteLine("Excluding the ones already reported...");
+
+            // If the LastRun date doesn't match either it's because it was fixed then broke again since last reported issue
+            notRunning = await RemoveReportedRegressions(notRunning, true, r => $"| {r.Scenario} | {r.OperatingSystem}, {r.Hardware}, {r.Scheme}, {r.WebHost} | {r.DateTimeUtc} |");
+
+            if (notRunning.Any())
+            {
+                Console.WriteLine("Reporting new scenarios...");
+
+                await CreateNotRunningIssue(notRunning);
+            }
+            else
+            {
+                Console.WriteLine("All scenarios are running correctly.");
+            }
+
+            // Bad responses
+
+            Console.WriteLine("Looking for scnearios that are not running...");
+
+            var badResponses = await FindErrors();
+
+            Console.WriteLine("Excluding the ones already reported...");
+
+            badResponses = await RemoveReportedRegressions(badResponses, true, r => $"| {r.Scenario} | {r.OperatingSystem}, {r.Hardware}, {r.Scheme}, {r.WebHost} |");
+
+            if (badResponses.Any())
+            {
+                Console.WriteLine("Reporting new scenarios...");
+
+                await CreateErrorsIssue(badResponses);
+            }
+            else
+            {
+                Console.WriteLine("All scenarios are running correctly.");
             }
         }
 
@@ -67,6 +118,7 @@ namespace BenchmarksBot
             _username = config["Username"];
             _connectionString = config["ConnectionString"];
             _ignoredScenarios = new HashSet<string>();
+            _tableName = config["Table"];
 
             if (_repositoryId == 0)
             {
@@ -96,7 +148,7 @@ namespace BenchmarksBot
             }
         }
 
-        private static async Task CreateIssue(IEnumerable<Regression> regressions)
+        private static async Task CreateRegressionIssue(IEnumerable<Regression> regressions)
         {
             if (regressions == null || !regressions.Any())
             {
@@ -150,7 +202,7 @@ namespace BenchmarksBot
                         {
                             body.AppendLine();
                             body.AppendLine("__Microsoft.AspNetCore.App__");
-                            body.AppendLine($"https://github.com/aspnet/Universe/compare/{r.AspNetCoreHashes[0]}...{r.AspNetCoreHashes[1]}");
+                            body.AppendLine($"https://github.com/aspnet/AspNetCore/compare/{r.AspNetCoreHashes[0]}...{r.AspNetCoreHashes[1]}");
                         }
                     }
 
@@ -173,6 +225,12 @@ namespace BenchmarksBot
                 }
             }
 
+
+            body
+                .AppendLine()
+                .AppendLine("[Logs](https://aka.ms/aspnet/benchmarks/jenkins)")
+                ;
+
             var title = "Performance regression: " + String.Join(", ", regressions.Select(x => x.Scenario).Take(5));
 
             if (regressions.Count() > 5)
@@ -185,6 +243,8 @@ namespace BenchmarksBot
                 Body = body.ToString()
             };
 
+            createIssue.Labels.Add("perf-regression");
+
             Console.Write(createIssue.Body);
             
             var issue = await client.Issue.Create(_repositoryId, createIssue);
@@ -196,11 +256,10 @@ namespace BenchmarksBot
 
             using (var connection = new SqlConnection(_connectionString))
             {
-                using (var command = new SqlCommand(Queries.Regressions, connection))
+                using (var command = new SqlCommand(Queries.Regressions.Replace("@table", _tableName), connection))
                 {
                     await connection.OpenAsync();
 
-                    var start = DateTime.UtcNow;
                     var reader = await command.ExecuteReaderAsync();
 
                     while (await reader.ReadAsync())
@@ -226,7 +285,7 @@ namespace BenchmarksBot
                             PreviousAspNetCoreVersion = Convert.ToString(reader["PreviousAspNetCoreVersion"]),
                             CurrentAspNetCoreVersion = Convert.ToString(reader["CurrentAspNetCoreVersion"]),
                             PreviousRuntimeVersion = Convert.ToString(reader["PreviousRuntimeVersion"]),
-                            CurrentRuntimeVersion = Convert.ToString(reader["CurrentRuntimeVersion"]),
+                            CurrentRuntimeVersion = Convert.ToString(reader["CurrentRuntimeVersion"])
                         });
                     }                    
                 }
@@ -235,8 +294,168 @@ namespace BenchmarksBot
             return regressions;
         }
 
-        private static async Task<IEnumerable<Regression>> RemoveReportedRegressions(IEnumerable<Regression> regressions)
+        private static async Task<IEnumerable<Regression>> FindNotRunning()
         {
+            var regressions = new List<Regression>();
+
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                using (var command = new SqlCommand(Queries.NotRunning.Replace("@table", _tableName), connection))
+                {
+                    await connection.OpenAsync();
+
+                    var reader = await command.ExecuteReaderAsync();
+
+                    while (await reader.ReadAsync())
+                    {
+                        regressions.Add(new Regression
+                        {
+                            Scenario = Convert.ToString(reader["Scenario"]),
+                            Hardware = Convert.ToString(reader["Hardware"]),
+                            OperatingSystem = Convert.ToString(reader["OperatingSystem"]),
+                            Scheme = Convert.ToString(reader["Scheme"]),
+                            WebHost = Convert.ToString(reader["WebHost"]),
+                            DateTimeUtc = (DateTimeOffset)(reader["LastDateTime"]),
+                        });
+                    }
+                }
+            }
+
+            return regressions;
+        }
+
+        private static async Task CreateNotRunningIssue(IEnumerable<Regression> regressions)
+        {
+            if (regressions == null || !regressions.Any())
+            {
+                return;
+            }
+
+            var client = new GitHubClient(_productHeaderValue);
+            client.Credentials = new Credentials(_accessToken);
+
+            var body = new StringBuilder();
+            body.Append("Some scenarios have stopped running:");
+
+            body.AppendLine();
+            body.AppendLine();
+            body.AppendLine("| Scenario | Environment | Last Run |");
+            body.AppendLine("| -------- | ----------- | -------- |");
+
+            foreach (var r in regressions.OrderBy(x => x.Scenario).ThenBy(x => x.DateTimeUtc))
+            {
+                body.AppendLine($"| {r.Scenario} | {r.OperatingSystem}, {r.Hardware}, {r.Scheme}, {r.WebHost} | {r.DateTimeUtc} |");
+            }
+
+            body
+                .AppendLine()
+                .AppendLine("[Logs](https://aka.ms/aspnet/benchmarks/jenkins)")
+                ;
+
+            var title = "Scenarios are not running: " + String.Join(", ", regressions.Select(x => x.Scenario).Take(5));
+
+            if (regressions.Count() > 5)
+            {
+                title += " ...";
+            }
+
+            var createIssue = new NewIssue(title)
+            {
+                Body = body.ToString()
+            };
+
+            createIssue.Labels.Add("not-running");
+
+            Console.Write(createIssue.Body);
+
+            var issue = await client.Issue.Create(_repositoryId, createIssue);
+        }
+
+        private static async Task<IEnumerable<Regression>> FindErrors()
+        {
+            var regressions = new List<Regression>();
+
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                using (var command = new SqlCommand(Queries.Error.Replace("@table", _tableName), connection))
+                {
+                    await connection.OpenAsync();
+
+                    var reader = await command.ExecuteReaderAsync();
+
+                    while (await reader.ReadAsync())
+                    {
+                        regressions.Add(new Regression
+                        {
+                            Scenario = Convert.ToString(reader["Scenario"]),
+                            Hardware = Convert.ToString(reader["Hardware"]),
+                            OperatingSystem = Convert.ToString(reader["OperatingSystem"]),
+                            Scheme = Convert.ToString(reader["Scheme"]),
+                            WebHost = Convert.ToString(reader["WebHost"]),
+                            DateTimeUtc = (DateTimeOffset)(reader["LastDateTime"]),
+                            Errors = Convert.ToInt32(reader["Errors"]),
+                        });
+                    }
+                }
+            }
+
+            return regressions;
+        }
+
+        private static async Task CreateErrorsIssue(IEnumerable<Regression> regressions)
+        {
+            if (regressions == null || !regressions.Any())
+            {
+                return;
+            }
+
+            var client = new GitHubClient(_productHeaderValue);
+            client.Credentials = new Credentials(_accessToken);
+
+            var body = new StringBuilder();
+            body.Append("Some scenarios return errors:");
+
+            body.AppendLine();
+            body.AppendLine();
+            body.AppendLine("| Scenario | Environment | Last Run | Errors |");
+            body.AppendLine("| -------- | ----------- | -------- | ------ |");
+
+            foreach (var r in regressions.OrderBy(x => x.Scenario).ThenBy(x => x.DateTimeUtc))
+            {
+                body.AppendLine($"| {r.Scenario} | {r.OperatingSystem}, {r.Hardware}, {r.Scheme}, {r.WebHost} | {r.DateTimeUtc} | {r.Errors} |");
+            }
+
+            body
+                .AppendLine()
+                .AppendLine("[Logs](https://aka.ms/aspnet/benchmarks/jenkins)")
+                ;
+
+            var title = "Bad responses: " + String.Join(", ", regressions.Select(x => x.Scenario).Take(5));
+
+            if (regressions.Count() > 5)
+            {
+                title += " ...";
+            }
+
+            var createIssue = new NewIssue(title)
+            {
+                Body = body.ToString()
+            };
+
+            createIssue.Labels.Add("bad-response");
+
+            Console.Write(createIssue.Body);
+
+            var issue = await client.Issue.Create(_repositoryId, createIssue);
+        }
+
+        private static async Task<IReadOnlyList<Issue>> GetRecentIssues()
+        {
+            if (_recentIssues != null)
+            {
+                return _recentIssues;
+            }
+
             var client = new GitHubClient(_productHeaderValue);
             client.Credentials = new Credentials(_accessToken);
 
@@ -244,10 +463,22 @@ namespace BenchmarksBot
             {
                 Filter = IssueFilter.Created,
                 State = ItemStateFilter.All,
-                Since = DateTimeOffset.Now.Subtract(TimeSpan.FromDays(3))
+                Since = DateTimeOffset.Now.Subtract(TimeSpan.FromDays(8))
             };
 
             var issues = await client.Issue.GetAllForRepository(_repositoryId, recently);
+
+            return _recentIssues = issues;
+        }
+
+        private static async Task<IEnumerable<Regression>> RemoveReportedRegressions(IEnumerable<Regression> regressions, bool ignoreClosedIssues, Func<Regression, string> textToFind)
+        {
+            if (!regressions.Any())
+            {
+                return regressions;
+            }
+
+            var issues = await GetRecentIssues();
 
             var filtered = new List<Regression>();
 
@@ -257,7 +488,12 @@ namespace BenchmarksBot
                 var filter = false;
                 foreach(var issue in issues)
                 {
-                    if (issue.Body != null && issue.Body.Contains(r.DateTimeUtc.ToString("u")))
+                    if (ignoreClosedIssues && issue.State == ItemState.Closed)
+                    {
+                        continue;
+                    }
+
+                    if (issue.Body != null && issue.Body.Contains(textToFind(r)))
                     {
                         filter = true;
                         break;
@@ -287,8 +523,8 @@ namespace BenchmarksBot
                 {
                     r.AspNetCoreHashes = new [] 
                     {
-                        await GetAspNetUniverseCommitHash(r.PreviousAspNetCoreVersion),
-                        await GetAspNetUniverseCommitHash(r.CurrentAspNetCoreVersion)
+                        await GetAspNetCoreCommitHash(r.PreviousAspNetCoreVersion),
+                        await GetAspNetCoreCommitHash(r.CurrentAspNetCoreVersion)
                     };
                 }
 
@@ -296,8 +532,8 @@ namespace BenchmarksBot
                 {
                     r.CoreClrHashes = new[]
                     {
-                        await GetRuntimeAssemblyCommitHash(r.PreviousRuntimeVersion, "SOS.NETCore.dll"),
-                        await GetRuntimeAssemblyCommitHash(r.CurrentRuntimeVersion, "SOS.NETCore.dll")
+                        await GetRuntimeAssemblyCommitHash(r.PreviousRuntimeVersion, "System.Private.CoreLib.dll"),
+                        await GetRuntimeAssemblyCommitHash(r.CurrentRuntimeVersion, "System.Private.CoreLib.dll")
                     };
 
                     r.CoreFxHashes = new[]
@@ -339,7 +575,7 @@ namespace BenchmarksBot
             return false;
         }
 
-        private static async Task<string> GetAspNetUniverseCommitHash(string aspNetCoreVersion)
+        private static async Task<string> GetAspNetCoreCommitHash(string aspNetCoreVersion)
         {
             var packagePath = Path.GetTempFileName();
 
@@ -347,7 +583,7 @@ namespace BenchmarksBot
             {
                 // Download Microsoft.AspNet.App
 
-                var aspNetAppUrl = _aspNetCoreUrlPrevix + aspNetCoreVersion;
+                var aspNetAppUrl = String.Format(_aspNetCorePackageFormat, AspNetCorePackage.ToLower(), aspNetCoreVersion);
                 if (!await DownloadFileAsync(aspNetAppUrl, packagePath))
                 {
                     return null;
@@ -361,12 +597,12 @@ namespace BenchmarksBot
 
                     try
                     {
-                        var entry = archive.GetEntry("Microsoft.AspNetCore.App.nuspec");
+                        var entry = archive.GetEntry($"{AspNetCorePackage}.nuspec");
                         entry.ExtractToFile(aspNetCoreNuSpecPath, true);
 
                         var root = XDocument.Parse(await File.ReadAllTextAsync(aspNetCoreNuSpecPath)).Root;
 
-                        XNamespace xmlns = "http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd";
+                        XNamespace xmlns = root.Attribute("xmlns").Value;
                         return root
                             .Element(xmlns + "metadata")
                             .Element(xmlns + "repository")
@@ -420,7 +656,14 @@ namespace BenchmarksBot
 
                     try
                     {
-                        var entry = archive.GetEntry($@"shared\Microsoft.NETCore.App\{netCoreAppVersion}\{assemblyName}");
+                        var entry = archive.GetEntry($@"shared\Microsoft.NETCore.App\{netCoreAppVersion}\{assemblyName}")
+                            ?? archive.GetEntry($@"shared/Microsoft.NETCore.App/{netCoreAppVersion}/{assemblyName}");
+
+                        if (entry == null)
+                        {
+                            throw new InvalidDataException($"'{netCoreAppUrl}' doesn't contain 'shared/Microsoft.NETCore.App/{netCoreAppVersion}/{assemblyName}'");
+                        }
+
                         entry.ExtractToFile(versionAssemblyPath, true);
 
                         using (var assembly = Mono.Cecil.AssemblyDefinition.ReadAssembly(versionAssemblyPath))
@@ -428,24 +671,17 @@ namespace BenchmarksBot
                             var informationalVersionAttribute = assembly.CustomAttributes.Where(x => x.AttributeType.Name == "AssemblyInformationalVersionAttribute").FirstOrDefault();
                             var argumentValule = informationalVersionAttribute.ConstructorArguments[0].Value.ToString();
 
-                            var srcCodeIndex = argumentValule.IndexOf("@SrcCode: ");
+                            var commitHashRegex = new Regex("[0-9a-f]{40}");
 
-                            if (srcCodeIndex == -1)
+                            var match = commitHashRegex.Match(argumentValule);
+
+                            if (match.Success)
                             {
-                                return null;
-                            }
-
-                            srcCodeIndex = srcCodeIndex + 10;
-
-                            var end = argumentValule.IndexOf(' ', srcCodeIndex);
-
-                            if (end == -1)
-                            {
-                                return argumentValule.Substring(srcCodeIndex).Split('/').LastOrDefault();
+                                return match.Value;
                             }
                             else
                             {
-                                return argumentValule.Substring(srcCodeIndex, end - srcCodeIndex).Split('/').LastOrDefault();
+                                return null;
                             }
                         }
                     }

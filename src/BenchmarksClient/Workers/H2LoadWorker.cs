@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
@@ -17,11 +16,16 @@ namespace BenchmarksClient.Workers
 {
     public class H2LoadWorker : IWorker
     {
+        private static TimeSpan FirstRequestTimeout = TimeSpan.FromSeconds(5);
+        private static TimeSpan LatencyTimeout = TimeSpan.FromSeconds(2);
+
         private static HttpClient _httpClient;
         private static HttpClientHandler _httpClientHandler;
 
         private ClientJob _job;
         private Process _process;
+        private string _requestBodyTempFile;
+        private int? _requestBodyLength;
 
         public string JobLogText { get; set; }
 
@@ -30,14 +34,19 @@ namespace BenchmarksClient.Workers
             // Configuring the http client to trust the self-signed certificate
             _httpClientHandler = new HttpClientHandler();
             _httpClientHandler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+            _httpClientHandler.MaxConnectionsPerServer = 1;
             _httpClient = new HttpClient(_httpClientHandler);
         }
-
 
         private void InitializeJob()
         {
             var jobLogText =
                         $"[ID:{_job.Id} Connections:{_job.Connections} Threads:{_job.Threads} Duration:{_job.Duration} Method:{_job.Method} ServerUrl:{_job.ServerBenchmarkUri}";
+
+            if (_requestBodyLength != null)
+            {
+                jobLogText += $" Request body length:{_requestBodyLength}";
+            }
 
             if (_job.Headers != null)
             {
@@ -52,6 +61,18 @@ namespace BenchmarksClient.Workers
         public async Task StartJobAsync(ClientJob job)
         {
             _job = job;
+
+            if (job.ClientProperties.TryGetValue("RequestBody", out var requestBodyText))
+            {
+                var requestBody = Convert.FromBase64String(requestBodyText);
+                _requestBodyLength = requestBody.Length;
+
+                // h2load takes a file as the request body
+                // write the body to a temporary file that is deleted in stop job
+                _requestBodyTempFile = Path.GetTempFileName();
+                await File.WriteAllBytesAsync(_requestBodyTempFile, requestBody);
+            }
+
             InitializeJob();
 
             await MeasureFirstRequestLatencyAsync(_job);
@@ -59,7 +80,7 @@ namespace BenchmarksClient.Workers
             _job.State = ClientState.Running;
             _job.LastDriverCommunicationUtc = DateTime.UtcNow;
 
-            _process = StartProcess(_job);
+            _process = StartProcess(_job, _requestBodyTempFile);
         }
 
         public Task StopJobAsync()
@@ -67,6 +88,11 @@ namespace BenchmarksClient.Workers
             if (_process != null && !_process.HasExited)
             {
                 _process.Kill();
+            }
+
+            if (_requestBodyTempFile != null && File.Exists(_requestBodyTempFile))
+            {
+                File.Delete(_requestBodyTempFile);
             }
 
             return Task.CompletedTask;
@@ -77,6 +103,7 @@ namespace BenchmarksClient.Workers
             _process.Dispose();
             _process = null;
         }
+
         private static HttpRequestMessage CreateHttpMessage(ClientJob job)
         {
             var requestMessage = new HttpRequestMessage(new HttpMethod(job.Method), job.ServerBenchmarkUri);
@@ -91,14 +118,6 @@ namespace BenchmarksClient.Workers
 
         private static async Task MeasureFirstRequestLatencyAsync(ClientJob job)
         {
-            // Ignoring startup latency when using h2c as HttpClient doesn't support
-
-            if (job.ServerBenchmarkUri.StartsWith("http:", StringComparison.OrdinalIgnoreCase))
-            {
-                Log("Ignoring first request latencies on h2c");
-                return;
-            }
-
             if (job.SkipStartupLatencies)
             {
                 return;
@@ -109,10 +128,28 @@ namespace BenchmarksClient.Workers
             var stopwatch = new Stopwatch();
             stopwatch.Start();
 
-            using (var response = await _httpClient.SendAsync(CreateHttpMessage(job)))
+            using (var message = CreateHttpMessage(job))
             {
-                var responseContent = await response.Content.ReadAsStringAsync();
-                job.LatencyFirstRequest = stopwatch.Elapsed;
+                var cts = new CancellationTokenSource();
+                var token = cts.Token;
+                cts.CancelAfter(FirstRequestTimeout);
+                token.ThrowIfCancellationRequested();
+
+                try
+                {
+                    using (var response = await _httpClient.SendAsync(message, token))
+                    {
+                        job.LatencyFirstRequest = stopwatch.Elapsed;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    Log("A timeout occured while measuring the first request: " + FirstRequestTimeout.ToString());
+                }
+                finally
+                {
+                    cts.Dispose();
+                }
             }
 
             Log($"{job.LatencyFirstRequest.TotalMilliseconds} ms");
@@ -123,19 +160,37 @@ namespace BenchmarksClient.Workers
             {
                 stopwatch.Restart();
 
-                using (var response = await _httpClient.SendAsync(CreateHttpMessage(job)))
+                using (var message = CreateHttpMessage(job))
                 {
-                    var responseContent = await response.Content.ReadAsStringAsync();
+                    var cts = new CancellationTokenSource();
+                    var token = cts.Token;
+                    cts.CancelAfter(LatencyTimeout);
+                    token.ThrowIfCancellationRequested();
 
-                    // We keep the last measure to simulate a warmup phase.
-                    job.LatencyNoLoad = stopwatch.Elapsed;
+                    try
+                    {
+                        using (var response = await _httpClient.SendAsync(message))
+                        {
+                            // We keep the last measure to simulate a warmup phase.
+                            job.LatencyNoLoad = stopwatch.Elapsed;
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        Log("A timeout occured while measuring the latency, skipping ...");
+                        break;
+                    }
+                    finally
+                    {
+                        cts.Dispose();
+                    }
                 }
             }
 
             Log($"{job.LatencyNoLoad.TotalMilliseconds} ms");
         }
 
-        private static Process StartProcess(ClientJob job)
+        private static Process StartProcess(ClientJob job, string requestBodyFile)
         {
             var command = $"h2load {job.ServerBenchmarkUri}{job.Query}";
 
@@ -147,11 +202,36 @@ namespace BenchmarksClient.Workers
                 }
             }
 
-            command += $" -D {job.Duration} -c {job.Connections} -T {job.Timeout} -t {job.Threads} --no-tls-proto=h2c ";
+            command += $" -c {job.Connections} -T {job.Timeout} -t {job.Threads}";
 
             if (job.ClientProperties.TryGetValue("Streams", out var m))
             {
                 command += $" -m {m}";
+            }
+
+            if (job.ClientProperties.TryGetValue("protocol", out var protocol))
+            {
+                switch (protocol)
+                {
+                    case "http": command += " --h1"; break;
+                    case "https": command += " --h1"; break;
+                    case "h2": break;
+                    case "h2c": command += " --no-tls-proto=h2c"; break;
+                }
+            }
+
+            if (requestBodyFile != null)
+            {
+                command += $" -d \"{requestBodyFile}\"";
+            }
+
+            if (job.ClientProperties.TryGetValue("n", out var n) && int.TryParse(n, out var number))
+            {
+                command += $" -n{n}";
+            }
+            else
+            {
+                command += $" -D {job.Duration}";
             }
 
             Log(command);

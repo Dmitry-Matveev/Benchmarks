@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Benchmarks.Configuration;
 using Microsoft.EntityFrameworkCore;
@@ -70,6 +71,7 @@ namespace Benchmarks.Data
             return results;
         }
 
+#if NETCOREAPP2_1 || NETCOREAPP2_2
         private static readonly Func<ApplicationDbContext, AsyncEnumerable<Fortune>> _fortunesQuery
             = EF.CompileAsyncQuery((ApplicationDbContext context) => context.Fortune);
 
@@ -82,5 +84,27 @@ namespace Benchmarks.Data
 
             return result;
         }
+
+#else
+        private static readonly Func<ApplicationDbContext, IAsyncEnumerable<Fortune>> _fortunesQuery
+            = EF.CompileAsyncQuery((ApplicationDbContext context) => context.Fortune);
+
+        public async Task<IEnumerable<Fortune>> LoadFortunesRows()
+        {
+            var result = new List<Fortune>();
+
+            await foreach (var fortune in _fortunesQuery(_dbContext))
+            {
+                result.Add(fortune);
+            }
+
+            result.Add(new Fortune { Message = "Additional fortune added at request time." });
+            
+            result.Sort();
+
+            return result;
+        }
+
+#endif
     }
 }

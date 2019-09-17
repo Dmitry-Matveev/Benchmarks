@@ -12,11 +12,15 @@ namespace BenchmarkServer
         private static readonly TimeSpan CheckoutTimeout = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan SubModuleTimeout = TimeSpan.FromSeconds(30);
 
-        public static string Clone(string path, string repository, string branch = null)
+        public static string Clone(string path, string repository, bool shallow = true, string branch = null)
         {
+            Log.WriteLine($"Cloning {repository} with branch '{branch}'");
+
             var branchParam = string.IsNullOrEmpty(branch) ? string.Empty : $"-b {branch}";
 
-            var result = RunGitCommand(path, $"clone -c core.longpaths=true {branchParam} {repository}", CloneTimeout, retries: 5);
+            var depth = shallow ? "--depth 1" : "";
+
+            var result = RunGitCommand(path, $"clone -c core.longpaths=true {depth} {branchParam} {repository}", CloneTimeout, retries: 5);
 
             var match = Regex.Match(result.StandardError, @"'(.*)'");
             if (match.Success && match.Groups.Count == 2)

@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading.Tasks;
@@ -66,7 +67,7 @@ namespace BenchmarkServer.Controllers
                     job.LastDriverCommunicationUtc = DateTime.UtcNow;
                     return new ObjectResult(job);
                 }
-            }   
+            }
         }
 
         [HttpPost]
@@ -83,7 +84,7 @@ namespace BenchmarkServer.Controllers
                 job.HardwareVersion = Startup.HardwareVersion;
                 job.OperatingSystem = Startup.OperatingSystem;
                 // Use server-side date and time to prevent issues fron time drifting
-                job.LastDriverCommunicationUtc = DateTime.UtcNow; 
+                job.LastDriverCommunicationUtc = DateTime.UtcNow;
                 job = _jobs.Add(job);
 
                 Response.Headers["Location"] = $"/jobs/{job.Id}";
@@ -112,7 +113,7 @@ namespace BenchmarkServer.Controllers
                     Response.Headers["Location"] = $"/jobs/{job.Id}";
                     return new StatusCodeResult((int)HttpStatusCode.Accepted);
                 }
-                catch(Exception e)
+                catch (Exception e)
                 {
                     Log($"Error while deleting job '{id}' " + e.Message);
                     return NotFound();
@@ -126,16 +127,32 @@ namespace BenchmarkServer.Controllers
             lock (_jobs)
             {
                 Log($"Driver stopping job '{id}'");
+
                 try
                 {
                     var job = _jobs.Find(id);
+
+                    if (job == null)
+                    {
+                        // The job doesn't exist anymore
+                        return NotFound();
+                    }
+
+                    if (job.State == ServerState.Stopped || job.State == ServerState.Failed)
+                    {
+                        // The job might have already been stopped, or deleted.
+                        // Can happen if the server stops the job, then the driver does it.
+                        // If the benchmark failed, it will be marked as Stopping automatically.
+                        return new StatusCodeResult((int)HttpStatusCode.Accepted);
+                    }
+
                     job.State = ServerState.Stopping;
                     _jobs.Update(job);
 
                     Response.Headers["Location"] = $"/jobs/{job.Id}";
                     return new StatusCodeResult((int)HttpStatusCode.Accepted);
                 }
-                catch(Exception e)
+                catch (Exception e)
                 {
                     Log($"Error while stopping job '{id}' " + e.Message);
                     return NotFound();
@@ -152,6 +169,7 @@ namespace BenchmarkServer.Controllers
                 {
                     var job = _jobs.Find(id);
                     job.ClearServerCounters();
+                    job.Counters.Clear();
                     _jobs.Update(job);
                     return Ok();
                 }
@@ -197,7 +215,7 @@ namespace BenchmarkServer.Controllers
         [RequestSizeLimit(100_000_000)]
         public async Task<IActionResult> UploadAttachment(AttachmentViewModel attachment)
         {
-            Log($"Uploading attachent");
+            Log($"Uploading attachment: {attachment.DestinationFilename}");
 
             var job = _jobs.Find(attachment.Id);
             var tempFilename = Path.GetTempFileName();
@@ -243,6 +261,31 @@ namespace BenchmarkServer.Controllers
             return Ok();
         }
 
+        [HttpPost("{id}/build")]
+        [RequestSizeLimit(100_000_000)]
+        public async Task<IActionResult> UploadBuildFile(AttachmentViewModel attachment)
+        {
+            Log($"Uploading build files");
+
+            var job = _jobs.Find(attachment.Id);
+            var tempFilename = Path.GetTempFileName();
+
+            using (var fs = System.IO.File.Create(tempFilename))
+            {
+                await attachment.Content.CopyToAsync(fs);
+            }
+
+            job.BuildAttachments.Add(new Attachment
+            {
+                TempFilename = tempFilename,
+                Filename = attachment.DestinationFilename,
+            });
+
+            job.LastDriverCommunicationUtc = DateTime.UtcNow;
+
+            return Ok();
+        }
+
         [HttpGet("{id}/trace")]
         public IActionResult Trace(int id)
         {
@@ -252,6 +295,29 @@ namespace BenchmarkServer.Controllers
                 {
                     var job = _jobs.Find(id);
                     return File(System.IO.File.OpenRead(job.PerfViewTraceFile), "application/object");
+                }
+                catch
+                {
+                    return NotFound();
+                }
+            }
+        }
+
+        [HttpGet("{id}/eventpipe")]
+        public IActionResult EventPipe(int id)
+        {
+            lock (_jobs)
+            {
+                try
+                {
+                    var job = _jobs.Find(id);
+
+                    foreach (var file in Directory.GetFiles(job.BasePath, "*.netperf"))
+                    {
+                        return File(System.IO.File.OpenRead(file), "application/object");
+                    }
+
+                    return NotFound();
                 }
                 catch
                 {
@@ -306,6 +372,48 @@ namespace BenchmarkServer.Controllers
                 Log($"Uploading {path} ({new FileInfo(fullPath).Length / 1024 + 1} KB)");
 
                 return File(System.IO.File.OpenRead(fullPath), "application/object");
+            }
+            catch (Exception e)
+            {
+                return StatusCode(500, e.Message);
+            }
+        }
+
+        [HttpGet("{id}/list")]
+        public IActionResult List(int id, string path)
+        {
+            try
+            {
+                var job = _jobs.Find(id);
+
+                if (job == null)
+                {
+                    return NotFound();
+                }
+
+                var fullPath = Path.Combine(job.BasePath, path);
+
+                if (!Directory.Exists(Path.GetDirectoryName(fullPath)))
+                {
+                    return Json(Array.Empty<string>());
+                }
+
+                if (fullPath.Contains("*"))
+                {
+                    return Json(
+                        Directory.GetFiles(Path.GetDirectoryName(fullPath), Path.GetFileName(fullPath))
+                        .Select(x => x.Substring(job.BasePath.Length).TrimStart('/', '\\'))
+                        .ToArray()
+                        );
+                }
+                else
+                {
+                    return Json(
+                        Directory.GetFiles(Path.GetDirectoryName(fullPath))
+                        .Select(x => x.Substring(job.BasePath.Length).TrimStart('/', '\\'))
+                        .ToArray()
+                        );
+                }
             }
             catch (Exception e)
             {

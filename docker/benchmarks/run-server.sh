@@ -40,7 +40,7 @@ done
 if [ -z "$server_ip" ]
 then
     # tries to get the ip from the available NICs, but it's recommended to set it manually to use the fastest one
-    server_ip=$(ip route get 1 | awk '{print $NF;exit}')
+    server_ip=$(ip route get 1 | awk -F"src " 'NR==1{split($2,a," ");print a[1]}')
 
     echo "Using server_ip=$server_ip"
 fi
@@ -68,6 +68,10 @@ else
     hardware=Physical
 fi
 
+if [[ $(dpkg --print-architecture) = *arm64* ]]; then
+  hardware=ARM64
+fi
+
 # Clean temp folder from previous runs
 sudo rm -rf /mnt/BenchmarksServer
 
@@ -92,7 +96,7 @@ docker run \
     --url $url \
     --hardware $hardware \
     --hardware-version $hardware_version \
-    --postgresql "Server=TFB-database;Database=hello_world;User Id=benchmarkdbuser;Password=benchmarkdbpass;Maximum Pool Size=1024;NoResetOnClose=true;Enlist=false;Max Auto Prepare=4" \
-    --mysql "Server=TFB-database;Database=hello_world;User Id=benchmarkdbuser;Password=benchmarkdbpass;Maximum Pool Size=1024;SslMode=None;ConnectionReset=false" \
-    --mssql "Server=TFB-database;Database=hello_world;User Id=sa;Password=Benchmarkdbp@55;Max Pool Size=100;" \
-    --mongodb "mongodb://TFB-database:27017?maxPoolSize=1024"
+    --postgresql "Server=TFB-database;Database=hello_world;User Id=benchmarkdbuser;Password=benchmarkdbpass;Maximum Pool Size=256;NoResetOnClose=true;Enlist=false;Max Auto Prepare=4" \
+    --mysql "Server=TFB-database;Database=hello_world;User Id=benchmarkdbuser;Password=benchmarkdbpass;Maximum Pool Size=256;SslMode=None;ConnectionReset=false" \
+    --mssql "Server=TFB-database;Database=hello_world;User Id=sa;Password=Benchmarkdbp@55;Encrypt=False;Max Pool Size=256;" \
+    --mongodb "mongodb://TFB-database:27017?maxPoolSize=256"

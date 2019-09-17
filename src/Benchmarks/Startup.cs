@@ -3,7 +3,12 @@
 
 using System;
 using System.Data.Common;
+#if NETCOREAPP3_0
+using Microsoft.Data.SqlClient;
+#else
 using System.Data.SqlClient;
+#endif
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Unicode;
 using Benchmarks.Configuration;
@@ -11,12 +16,15 @@ using Benchmarks.Data;
 using Benchmarks.Middleware;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MongoDB.Driver;
 using Npgsql;
+using System.IO;
+using Microsoft.AspNetCore.WebUtilities;
 
 namespace Benchmarks
 {
@@ -60,18 +68,20 @@ namespace Benchmarks
                 Console.WriteLine("Using Application Insights");
                 services.AddApplicationInsightsTelemetry(appSettings.AiInstrumentationKey);
             }
+            BatchUpdateString.DatabaseServer = appSettings.Database;
 
             Console.WriteLine($"Database: {appSettings.Database}");
+            Console.WriteLine($"ConnectionString: {appSettings.ConnectionString}");
 
             switch (appSettings.Database)
             {
                 case DatabaseServer.PostgreSql:
                     services.AddEntityFrameworkNpgsql();
-                     var settings = new NpgsqlConnectionStringBuilder(appSettings.ConnectionString);
-                     if (!settings.NoResetOnClose)
-                         throw new ArgumentException("No Reset On Close=true must be specified for Npgsql");
-                     if (settings.Enlist)
-                         throw new ArgumentException("Enlist=false must be specified for Npgsql");
+                    var settings = new NpgsqlConnectionStringBuilder(appSettings.ConnectionString);
+                    if (!settings.NoResetOnClose)
+                        throw new ArgumentException("No Reset On Close=true must be specified for Npgsql");
+                    if (settings.Enlist)
+                        throw new ArgumentException("Enlist=false must be specified for Npgsql");
 
                     services.AddDbContextPool<ApplicationDbContext>(options => options.UseNpgsql(appSettings.ConnectionString));
 
@@ -92,6 +102,10 @@ namespace Benchmarks
                     break;
 
                 case DatabaseServer.MySql:
+
+#if NETCOREAPP3_0
+                    throw new NotSupportedException("EF/MySQL is unsupported on netcoreapp3.0 until a provider is available");
+#else
                     services.AddEntityFrameworkMySql();
                     services.AddDbContextPool<ApplicationDbContext>(options => options.UseMySql(appSettings.ConnectionString));
 
@@ -99,7 +113,9 @@ namespace Benchmarks
                     {
                         services.AddSingleton<DbProviderFactory>(MySql.Data.MySqlClient.MySqlClientFactory.Instance);
                     }
+
                     break;
+#endif
 
                 case DatabaseServer.MongoDb:
                     var mongoClient = new MongoClient(appSettings.ConnectionString);
@@ -131,11 +147,6 @@ namespace Benchmarks
                 services.AddScoped<MongoDb>();
             }
 
-            if (Scenarios.Any("Update"))
-            {
-                BatchUpdateString.Initalize();
-            }
-
             if (Scenarios.Any("Fortunes"))
             {
                 var settings = new TextEncoderSettings(UnicodeRanges.BasicLatin, UnicodeRanges.Katakana, UnicodeRanges.Hiragana);
@@ -146,20 +157,17 @@ namespace Benchmarks
                 });
             }
 
+#if NETCOREAPP2_1 || NETCOREAPP2_2
             if (Scenarios.Any("Mvc"))
             {
                 var mvcBuilder = services
                     .AddMvcCore()
-#if NETCOREAPP2_1 || NETCOREAPP2_2
-                    .SetCompatibilityVersion(CompatibilityVersion.Latest)
-#endif
-;
+                    .SetCompatibilityVersion(CompatibilityVersion.Latest);
 
                 if (Scenarios.MvcJson || Scenarios.Any("MvcDbSingle") || Scenarios.Any("MvcDbMulti"))
                 {
                     mvcBuilder.AddJsonFormatters();
                 }
-
                 if (Scenarios.MvcViews || Scenarios.Any("MvcDbFortunes"))
                 {
                     mvcBuilder
@@ -167,6 +175,33 @@ namespace Benchmarks
                         .AddRazorViewEngine();
                 }
             }
+#elif NETCOREAPP3_0
+            if (Scenarios.Any("Endpoint"))
+            {
+                services.AddRouting();
+            }
+
+            if (Scenarios.Any("Mvc"))
+            {
+                IMvcBuilder builder;
+
+                if (Scenarios.MvcViews || Scenarios.Any("MvcDbFortunes"))
+                {
+                    builder = services.AddControllersWithViews();
+                }
+                else
+                {
+                    builder = services.AddControllers();
+                }
+
+                if (Scenarios.Any("MvcJsonNet"))
+                {
+                    builder.AddNewtonsoftJson();
+                }
+            }
+#else
+#error "Unsupported TFM"
+#endif
 
             if (Scenarios.Any("MemoryCache"))
             {
@@ -199,11 +234,6 @@ namespace Benchmarks
             if (Scenarios.Json)
             {
                 app.UseJson();
-            }
-
-            if (Scenarios.Jil)
-            {
-                app.UseJil();
             }
 
             if (Scenarios.CopyToAsync)
@@ -295,10 +325,44 @@ namespace Benchmarks
                 app.UseFortunesEf();
             }
 
+#if NETCOREAPP2_1 || NETCOREAPP2_2
             if (Scenarios.Any("Mvc"))
             {
                 app.UseMvc();
             }
+#elif NETCOREAPP3_0
+            if (Scenarios.Any("EndpointPlaintext"))
+            {
+                app.UseRouting();
+
+                app.UseEndpoints(endpoints =>
+                {
+                    var _helloWorldPayload = Encoding.UTF8.GetBytes("Hello, World!");
+
+                    endpoints.Map(
+                        requestDelegate: context =>
+                        {
+                            var payloadLength = _helloWorldPayload.Length;
+                            var response = context.Response;
+                            response.StatusCode = 200;
+                            response.ContentType = "text/plain";
+                            response.ContentLength = payloadLength;
+                            return response.Body.WriteAsync(_helloWorldPayload, 0, payloadLength);
+                        },
+                        pattern: "/ep-plaintext");
+                });
+            }
+
+            if (Scenarios.Any("Mvc"))
+            {
+                app.UseRouting();
+            
+                app.UseEndpoints(endpoints =>
+                {
+                    endpoints.MapControllers();
+                });
+            }
+#endif
 
             if (Scenarios.MemoryCachePlaintext)
             {

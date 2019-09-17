@@ -18,25 +18,31 @@ Options:
   -i|--iterations        The number of iterations.
   -x|--exclude           The number of best and worst jobs to skip.  
   --database             The type of database to run the benchmarks with (PostgreSql, SqlServer or MySql). Default is None.
-  -cf|--connectionFilter Assembly-qualified name of the ConnectionFilter
   --kestrelThreadCount   Maps to KestrelServerOptions.ThreadCount.
   -n|--scenario          Benchmark scenario to run
   -m|--scheme            Scheme (http, https, h2, h2c). Default is http.
   -w|--webHost           WebHost (e.g., KestrelLibuv, KestrelSockets, HttpSys). Default is KestrelSockets.
-  --aspnet               ASP.NET Core packages version (Current, Latest, or custom value). Current is the latest public version (2.0.*), Latest is the currently developped one. Default is Latest (2.1-*).
-  --dotnet               .NET Core Runtime version (Current, Latest, Edge or custom value). Current is the latest public version, Latest is the one enlisted, Edge is the latest available. Default is Latest (2.1.0-*).
-  -a|--arg                Argument to pass to the application. (e.g., --arg --raw=true --arg "single_value")
+  -aspnet                ASP.NET Core packages version (Current, Latest, or custom value). Current is the latest public version (2.0.*), Latest is the currently developped one. Default is Latest (2.1-*).
+  -dotnet                .NET Core Runtime version (Current, Latest, Edge or custom value). Current is the latest public version, Latest is the one enlisted, Edge is the latest available. Default is Latest (2.1.0-*).
+  -a|--arg               Argument to pass to the application. (e.g., --arg --raw=true --arg "single_value")
+  --no-arguments         Removes any predefined arguments from the server application command line.
   --port                 The port used to request the benchmarked application. Default is 5000.
   --ready-text           The text that is displayed when the application is ready to accept requests. (e.g., "Application started.")
   -r|--repository        Git repository containing the project to test.
+  -b|--branch            Git branch to checkout.
+  -h|--hash              Git hash to checkout.
   --projectFile          Relative path of the project to test in the repository. (e.g., "src/Benchmarks/Benchmarks.csproj")
+  --init-submodules      When set will init submodules on the repository.
   -df|--docker-file      File path of the Docker script. (e.g, "frameworks/CSharp/aspnetcore/aspcore.dockerfile")
   -dc|--docker-context   Docker context directory. Defaults to the Docker file directory. (e.g., "frameworks/CSharp/aspnetcore/")
   -di|--docker-image     The name of the Docker image to create. If not net one will be created from the Docker file name. (e.g., "aspnetcore21")
   --runtime-store        Runs the benchmarks using the runtime store (2.0) or shared aspnet framework (2.1).
-  --outputFile           Output file attachment. Format is 'path[;destination]'. FilePath can be a URL. e.g., "--outputFile c:\build\Microsoft.AspNetCore.Mvc.dll", "--outputFile c:\files\samples\picture.png;wwwroot\picture.png"
+  --output-file          Output file attachment. Format is 'path[;destination]'. Destination is relative to the publication folder. e.g., "--outputFile c:\build\Microsoft.AspNetCore.Mvc.dll", "--outputFile c:\files\samples\picture.png;wwwroot\picture.png"
+  --output-archive       Output archive attachment. Format is 'path[;destination]'. Path can be a URL. Destination is relative to the publication folder. e.g., "--output-archive c:\build\Microsoft.AspNetCore.Mvc.zip\", "--output-archive http://raw/github.com/pictures.zip;wwwroot\pictures"
+  --build-file           Build file attachment. Format is 'path[;destination]'. Destination is relative to the source folder. e.g., "--outputFile c:\build\Microsoft.AspNetCore.Mvc.dll", "--outputFile c:\files\samples\picture.png;wwwroot\picture.png"
+  --build-archive        Build archive attachment. Format is 'path[;destination]'. Path can be a URL. Destination is relative to the source folder. e.g., "--output-archive c:\build\Microsoft.AspNetCore.Mvc.zip\", "--output-archive http://raw/github.com/pictures.zip;wwwroot\pictures"
   -src|--source          Local folder containing the project to test.
-  --client-threads        Number of threads used by client. Default is 32.
+  --client-threads       Number of threads used by client. Default is 32.
   --timeout              Timeout for client connections. e.g., 2s
   --connections          Number of connections used by client. Default is 256.
   --duration             Duration of test in seconds. Default is 15.
@@ -51,33 +57,50 @@ Options:
   --querystring          Querystring to add to the requests. (e.g., "?page=1")
   -j|--jobs              The path or url to the jobs definition.
   --collect-trace        Collect a PerfView trace. Optionally set custom arguments. e.g., BufferSize=256;InMemoryCircularBuffer
+  --collect-startup      Includes the startup phase in the trace.
+  --collect-counters     Collect event counters.
   --trace-output         Can be a file prefix (app will add *.DATE.RPS*.etl.zip) , or a specific name (end in *.etl.zip) and no DATE.RPS* will be added e.g. --trace-output c:\traces\myTrace
   --trace-arguments      Arguments used when collecting a PerfView trace, e.g., Providers=.NETTasks:0:0 (Defaults are BufferSizeMB=1024;CircularMB=1024 on Windows and -collectsec 10 on Linux)
   --enable-eventpipe     Enables EventPipe perf collection.
+  --eventpipe-arguments  EventPipe configuration. Defaults to "Microsoft-DotNETCore-SampleProfiler:1:5,Microsoft-Windows-DotNETRuntime:4c14fccbd:5"
   --before-shutdown      An endpoint to call before the application has shut down.
   -sp|--span             The time during which the client jobs are repeated, in 'HH:mm:ss' format. e.g., 48:00:00 for 2 days
+  -md|--markdown         Formats the output in markdown
   -t|--table             Table name of the SQL Database to store results
   --no-crossgen          Disables Ready To Run (aka crossgen), in order to use the JITed version of the assemblies.
   --tiered-compilation   Enables tiered-compilation.
   --self-contained       Publishes the .NET Core runtime with the application.
-  -e|--env               Defines custom envrionment variables to use with the benchmarked application e.g., -e KEY=VALUE -e A=B
-  -b|--build-property    Defines custom build properties to use with the benchmarked application e.g., -bp KEY=VALUE -e "A=B"
+  -e|--env               Defines custom environment variables to use with the benchmarked application e.g., -e KEY=VALUE -e A=B
+  -ba|--build-arg        Defines custom build arguments to use with the benchmarked application e.g., -b "/p:foo=bar" --build-arg "quiet"
   --windows-only         Don't execute the job if the server is not running on Windows
   --linux-only           Don't execute the job if the server is not running on Linux
   --save                 Stores the results in a local file, e.g. --save baseline. If the extension is not specified, '.bench.json' is used.
+  --diff                 Displays the results of the run compared to a previously saved result, e.g. --diff baseline. If the extension is not specified, '.bench.json' is used.
   -d|--download          Downloads specific server files. This argument can be used multiple times. e.g., -d "published/wwwroot/picture.png"
   --fetch                Downloads the published application locally.
   --fetch-output         Can be a file prefix (app will add *.DATE*.zip) , or a specific name (end in *.zip) and no DATE* will be added e.g. --fetch-output c:\publishedapps\myApp
   -wf|--write-file       Writes the results to a file named "results.md". NB: Use the --description argument to differentiate multiple results.
   --display-output       Displays the standard output from the server job.
   --benchmarkdotnet      Runs a BenchmarkDotNet application. e.g., --benchmarkdotnet Benchmarks.LabPerf.Md5VsSha256
-
+  --console              Runs the benchmarked application as a console application, such that no client is used and its output is displayed locally.
+  --server-timeout       Timeout for server jobs. e.g., 00:05:00
+  --framework            TFM to use if automatic resolution based runtime should not be used. e.g., netcoreapp2.1
+  --sdk                  SDK version to use
+  --initialize           A script to run before the application starts, e.g. "du", "/usr/bin/env bash dotnet-install.sh"
+  --clean                A script to run after the application has stopped, e.g. "du", "/usr/bin/env bash dotnet-install.sh"
+  -mem|--memory          The amount of memory available for the process, e.g. -mem 64mb, -mem 1gb. Supported units are (gb, mb, kb, b or none for bytes).
 
 Properties of the Wrk client
 
   ScriptName             Name of the script used by wrk.
   PipelineDepth          Depth of pipeline used by clients.
-  Scripts                List of paths or urls to lua scripts to use, sperater by semi-colons (;).
+  Scripts                List of paths or urls to lua scripts to use, separated by semi-colons (;).
+
+Properties of the Wrk2 client
+
+  Same as the Wrk client, but requires the "rate" parameter
+
+  rate                   Rate limit in requests per second
 
 Properties of the SignalR client
   HubProtocol            Name of the hub protocol to be used between client and server.
@@ -94,13 +117,18 @@ Properties of the H2Load client
 
   Streams                Max concurrent streams to issue per session. When http/1.1 is used, this specifies the number of HTTP pipelining requests in-flight. Default is 1.
 
+Properties of the Bombardier client
+
+  rate                   Rate limit in requests per second
+  requests               Number of requests (substitutes --duration)
+
 ```
 
 ### Examples
 
 #### Using a local job definition file
 
-Running the "Plaintext" job defined in the `benchmaks.json` file, targeting the latest stable release of ASP.NET Core.
+Running the "Plaintext" job defined in the `benchmarks.json` file, targeting the latest stable release of ASP.NET Core.
 
 ```powershell
 dotnet run -c release --server "http://localhost:5001" --client "http://10.0.75.2:5002" -n Plaintext -j "C:\Benchmarks\benchmarks.json" --aspnetCoreVersion Current

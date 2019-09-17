@@ -2,8 +2,10 @@
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.Tracing;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -18,11 +20,15 @@ using System.Threading.Tasks;
 using System.Xml.Linq;
 using System.Xml.XPath;
 using Benchmarks.ServerJob;
+using BenchmarksServer;
 using McMaster.Extensions.CommandLineUtils;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Diagnostics.Tools.RuntimeClient;
+using Microsoft.Diagnostics.Tracing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
 using Repository;
@@ -32,25 +38,39 @@ namespace BenchmarkServer
 {
     public class Startup
     {
-        // Version of ASP.NET used when targetting the Current versions
-        // TODO: Update the condition in Benchmarks.csproj whenever this version is changed
-        private static string CurrentAspNetCoreVersion = "2.1.4";
 
-        // TFM when using the Current versions
-        private static string CurrentTargetFramework = "netcoreapp2.1";
+        /*
+         * List of accepted values for AspNetCoreVersion and RuntimeVersion
+         * 
+            Current The latest stable version
+            Latest  The latest available version
+            2.1     The latest stable version for 2.1, e.g. 2.1.9 (channel version)
+            2.1.*   The latest service release for 2.1, e.g. 2.1.10-servicing-12345
+            2.1.8   This specific version
+         */
 
-        private const string PerfViewVersion = "P2.0.26";
+        // Substituion values when "Latest" is passed as the version
+        private static string LatestTargetFramework = "netcoreapp3.0";
+        private static string LatestChannel = "3.0";
+
+        // Substituion values when "Current" is passed as the version
+        private static string CurrentTargetFramework = "netcoreapp2.2";
+        private static string CurrentChannel = "2.2";
+
+        private const string PerfViewVersion = "P2.0.42";
 
         private static readonly HttpClient _httpClient;
         private static readonly HttpClientHandler _httpClientHandler;
         private static readonly string _dotnetInstallShUrl = "https://raw.githubusercontent.com/dotnet/cli/master/scripts/obtain/dotnet-install.sh";
         private static readonly string _dotnetInstallPs1Url = "https://raw.githubusercontent.com/dotnet/cli/master/scripts/obtain/dotnet-install.ps1";
-        private static readonly string _latestAspnetCoreRuntimeUrl = "https://dotnet.myget.org/F/aspnetcore-dev/api/v3/registration1/Microsoft.AspNetCore.App/index.json";
-        private static readonly string _currentDotnetRuntimeUrl = "https://dotnetcli.blob.core.windows.net/dotnet/Runtime/Current/latest.version";
-        private static readonly string _edgeDotnetRuntimeUrl = "https://dotnetcli.blob.core.windows.net/dotnet/Runtime/master/latest.version";
-        private static readonly string _sdkVersionUrl = "https://raw.githubusercontent.com/aspnet/BuildTools/release/2.2/files/KoreBuild/config/sdk.version";
-        private static readonly string _universeDependenciesUrl = "https://raw.githubusercontent.com/aspnet/Universe/release/2.2/build/dependencies.props";
+        private static readonly string _aspNetCoreDependenciesUrl = "https://raw.githubusercontent.com/aspnet/AspNetCore/{0}";
         private static readonly string _perfviewUrl = $"https://github.com/Microsoft/perfview/releases/download/{PerfViewVersion}/PerfView.exe";
+        private static readonly string _currentAspNetApiUrl = "https://api.nuget.org/v3/registration3/microsoft.aspnetcore.app/index.json";
+        private static readonly string _aspnetFlatContainerUrl = "https://dotnetfeed.blob.core.windows.net/aspnet-aspnetcore/flatcontainer/microsoft.aspnetcore.server.kestrel.transport.libuv/index.json";
+        private static readonly string _latestRuntimeApiUrl = "https://dotnetfeed.blob.core.windows.net/dotnet-core/flatcontainer/microsoft.netcore.app/index.json";
+        private static readonly string _releaseMetadata = "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/releases-index.json";
+        private static readonly string _sdkVersionUrl = "https://dotnetcli.blob.core.windows.net/dotnet/Sdk/{0}/latest.version";
+        private static readonly string _buildToolsSdk = "https://raw.githubusercontent.com/aspnet/BuildTools/master/files/KoreBuild/config/sdk.version";
 
         // Cached lists of SDKs and runtimes already installed
         private static readonly HashSet<string> _installedAspNetRuntimes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -71,6 +91,13 @@ namespace BenchmarkServer
         public static Hardware Hardware { get; private set; }
         public static string HardwareVersion { get; private set; }
         public static Dictionary<Database, string> ConnectionStrings = new Dictionary<Database, string>();
+        public static TimeSpan DriverTimeout = TimeSpan.FromSeconds(10);
+        public static TimeSpan BuildTimeout = TimeSpan.FromMinutes(30);
+
+        private static string _startPerfviewArguments;
+        private static ulong eventPipeSessionId = 0;
+        private static Task eventPipeTask = null;
+        private static bool eventPipeTerminated = false;
 
         static Startup()
         {
@@ -102,15 +129,38 @@ namespace BenchmarkServer
                     Log.WriteLine($"Attempting to deleting '{tempFolder}'");
                     File.Delete(tempFolder);
                 }
-                catch(Exception e)
+                catch (Exception e)
                 {
                     Log.WriteLine("Failed with error: " + e.Message);
                 }
             }
 
+            // Add a Nuget.config for the self-contained deployments to be able to find the runtime packages on the CI feeds
+
+            var rootNugetConfig = Path.Combine(_rootTempDir, "NuGet.Config");
+
+            if (!File.Exists(rootNugetConfig))
+            {
+                File.WriteAllText(rootNugetConfig, @"<?xml version=""1.0"" encoding=""utf-8""?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key=""aspnetcore"" value=""https://dotnetfeed.blob.core.windows.net/aspnet-aspnetcore/index.json"" />
+    <add key=""dotnet-core"" value=""https://dotnetfeed.blob.core.windows.net/dotnet-core/index.json"" />
+    <add key=""extensions"" value=""https://dotnetfeed.blob.core.windows.net/aspnet-extensions/index.json"" />
+    <add key=""aspnetcore-tooling"" value=""https://dotnetfeed.blob.core.windows.net/aspnet-aspnetcore-tooling/index.json"" />
+    <add key=""entityframeworkcore"" value=""https://dotnetfeed.blob.core.windows.net/aspnet-entityframeworkcore/index.json"" />
+    <add key=""NuGet"" value=""https://api.nuget.org/v3/index.json"" />
+  </packageSources>
+</configuration>
+");
+            }
+
             // Configuring the http client to trust the self-signed certificate
             _httpClientHandler = new HttpClientHandler();
             _httpClientHandler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+            _httpClientHandler.AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate;
+
             _httpClient = new HttpClient(_httpClientHandler);
 
             // Download PerfView
@@ -152,7 +202,7 @@ namespace BenchmarkServer
             {
                 if (_cleanup && Directory.Exists(_rootTempDir))
                 {
-                    DeleteDir(_rootTempDir);
+                    TryDeleteDir(_rootTempDir, false);
                 }
             };
 
@@ -167,14 +217,18 @@ namespace BenchmarkServer
 
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddMvc();
-
+            services.AddControllersWithViews().AddNewtonsoftJson();
             services.AddSingleton(_jobs);
         }
 
         public void Configure(IApplicationBuilder app)
         {
-            app.UseMvc();
+            app.UseRouting();
+
+            app.UseEndpoints(endpoints =>
+            {
+                endpoints.MapDefaultControllerRoute();
+            });
 
             // Register a default startup page to ensure the application is up
             app.Run((context) =>
@@ -206,11 +260,11 @@ namespace BenchmarkServer
                 CommandOptionType.SingleValue);
             var hostnameOption = app.Option("-n|--hostname", $"Hostname for benchmark server.  Default is '{_defaultHostname}'.",
                 CommandOptionType.SingleValue);
+            var dockerHostnameOption = app.Option("-nd|--docker-hostname", $"Hostname for benchmark server when running Docker on a different hostname.",
+                CommandOptionType.SingleValue);
             var hardwareOption = app.Option("--hardware", "Hardware (Cloud or Physical).  Required.",
                 CommandOptionType.SingleValue);
             var hardwareVersionOption = app.Option("--hardware-version", "Hardware version (e.g, D3V2, Z420, ...).  Required.",
-                CommandOptionType.SingleValue);
-            var databaseOption = app.Option("-d|--database", "Database (PostgreSQL, SqlServer, MySql or MongoDb).",
                 CommandOptionType.SingleValue);
             var noCleanupOption = app.Option("--no-cleanup",
                 "Don't kill processes or delete temp directories.", CommandOptionType.NoValue);
@@ -271,15 +325,15 @@ namespace BenchmarkServer
 
                 var url = urlOption.HasValue() ? urlOption.Value() : _defaultUrl;
                 var hostname = hostnameOption.HasValue() ? hostnameOption.Value() : _defaultHostname;
+                var dockerHostname = dockerHostnameOption.HasValue() ? dockerHostnameOption.Value() : hostname;
 
-
-                return Run(url, hostname).Result;
+                return Run(url, hostname, dockerHostname).Result;
             });
 
             return app.Execute(args);
         }
 
-        private static async Task<int> Run(string url, string hostname)
+        private static async Task<int> Run(string url, string hostname, string dockerHostname)
         {
             var host = new WebHostBuilder()
                     .UseKestrel()
@@ -295,7 +349,7 @@ namespace BenchmarkServer
             var hostTask = host.RunAsync();
 
             var processJobsCts = new CancellationTokenSource();
-            var processJobsTask = ProcessJobs(hostname, processJobsCts.Token);
+            var processJobsTask = ProcessJobs(hostname, dockerHostname, processJobsCts.Token);
 
             var completedTask = await Task.WhenAny(hostTask, processJobsTask);
 
@@ -309,37 +363,48 @@ namespace BenchmarkServer
             return 0;
         }
 
-        private static async Task ProcessJobs(string hostname, CancellationToken cancellationToken)
+        private static async Task ProcessJobs(string hostname, string dockerHostname, CancellationToken cancellationToken)
         {
             string dotnetHome = null;
+
             try
             {
+                // Create a temporary folder to store all installed dotnet runtimes/sdk
                 dotnetHome = GetTempDir();
 
                 Process process = null;
+                string workingDirectory = null;
                 Timer timer = null;
                 var executionLock = new object();
                 var disposed = false;
+                var standardOutput = new StringBuilder();
+                var standardError = new StringBuilder();
+                string benchmarksDir = null;
+                var startMonitorTime = DateTime.UtcNow;
 
                 string tempDir = null;
                 string dockerImage = null;
                 string dockerContainerId = null;
+
+                eventPipeSessionId = 0;
+                eventPipeTask = null;
+                eventPipeTerminated = false;
 
                 while (!cancellationToken.IsCancellationRequested)
                 {
                     ServerJob job = null;
 
                     // Find the first job that is not in Initializing state
-                    foreach(var j in _jobs.GetAll())
+                    foreach (var j in _jobs.GetAll())
                     {
                         if (j.State == ServerState.Initializing)
                         {
                             var now = DateTime.UtcNow;
 
-                            if (now - j.LastDriverCommunicationUtc > TimeSpan.FromSeconds(30))
+                            if (now - j.LastDriverCommunicationUtc > DriverTimeout)
                             {
                                 // The job needs to be deleted
-                                Log.WriteLine($"Driver didn't communicate for {now - j.LastDriverCommunicationUtc}. Halting job.");
+                                Log.WriteLine($"Driver didn't communicate for {DriverTimeout}. Halting job. ({j.State})");
                                 j.State = ServerState.Deleting;
                             }
                             else
@@ -349,25 +414,22 @@ namespace BenchmarkServer
                             }
                         }
 
+                        Log.WriteLine($"Processing job {j.Id} in state {j.State}");
+
                         job = j;
                         break;
                     }
 
                     if (job != null)
                     {
-                        string dotnetDir = dotnetHome;
-                        string benchmarksDir = null;
-                        var standardOutput = new StringBuilder();
-                        var startMonitorTime = DateTime.UtcNow;
-
                         if (job.State == ServerState.Failed)
                         {
                             var now = DateTime.UtcNow;
 
                             // Clean the job in case the driver is not running
-                            if (now - job.LastDriverCommunicationUtc > TimeSpan.FromSeconds(30))
+                            if (now - job.LastDriverCommunicationUtc > DriverTimeout)
                             {
-                                Log.WriteLine($"Driver didn't communicate for {now - job.LastDriverCommunicationUtc}. Halting job.");
+                                Log.WriteLine($"Driver didn't communicate for {DriverTimeout}. Halting job. ({job.State})");
                                 job.State = ServerState.Deleting;
                             }
                         }
@@ -390,29 +452,93 @@ namespace BenchmarkServer
                                 Log.WriteLine($"Starting job '{job.Id}' with scenario '{job.Scenario}'");
                                 job.State = ServerState.Starting;
 
+                                standardOutput.Clear();
+                                standardError.Clear();
+                                startMonitorTime = DateTime.UtcNow;
+
                                 Debug.Assert(tempDir == null);
                                 tempDir = GetTempDir();
+                                workingDirectory = null;
+                                dockerImage = null;
 
                                 if (job.Source.DockerFile != null)
                                 {
-                                    (dockerContainerId, dockerImage) = await DockerBuildAndRun(tempDir, job, hostname);
+                                    try
+                                    {
+                                        var buildStart = DateTime.UtcNow;
+                                        var cts = new CancellationTokenSource();
+                                        var buildAndRunTask = Task.Run(() => DockerBuildAndRun(tempDir, job, dockerHostname, standardOutput, cancellationToken: cts.Token));
+
+                                        while (true)
+                                        {
+                                            if (buildAndRunTask.IsCompleted)
+                                            {
+                                                (dockerContainerId, dockerImage, workingDirectory) = buildAndRunTask.Result;
+                                                break;
+                                            }
+
+                                            // Cancel the build if the driver timed out
+                                            if (DateTime.UtcNow - job.LastDriverCommunicationUtc > DriverTimeout)
+                                            {
+                                                Log.WriteLine($"Driver didn't communicate for {DriverTimeout}. Halting build.");
+                                                cts.Cancel();
+                                                await buildAndRunTask;
+
+                                                job.State = ServerState.Failed;
+                                                break;
+                                            }
+
+                                            // Cancel the build if it's taking too long
+                                            if (DateTime.UtcNow - buildStart > BuildTimeout)
+                                            {
+                                                Log.WriteLine($"Build is taking too long. Halting build.");
+                                                cts.Cancel();
+                                                await buildAndRunTask;
+
+                                                job.Error = "Build is taking too long. Halting build.";
+                                                job.State = ServerState.Failed;
+                                                break;
+                                            }
+
+                                            await Task.Delay(1000);
+                                        }
+                                    }
+                                    catch (Exception e)
+                                    {
+                                        workingDirectory = null;
+                                        Log.WriteLine($"Job failed with DockerBuildAndRun: " + e.Message);
+                                        job.State = ServerState.Failed;
+                                    }
                                 }
                                 else
                                 {
-                                    // returns the application directory and the dotnet directory to use
-                                    (benchmarksDir, dotnetDir) = await CloneRestoreAndBuild(tempDir, job, dotnetDir);
-
-                                    if (benchmarksDir != null && dotnetDir != null)
+                                    try
                                     {
-                                        Debug.Assert(process == null);
-                                        process = await StartProcess(hostname, Path.Combine(tempDir, benchmarksDir), job, dotnetDir, standardOutput);
-
-                                        job.ProcessId = process.Id;
+                                        // returns the application directory and the dotnet directory to use
+                                        benchmarksDir = await CloneRestoreAndBuild(tempDir, job, dotnetHome);
                                     }
-                                    else
+                                    finally
                                     {
-                                        Log.WriteLine($"Job failed with CloneRestoreAndBuild");
-                                        job.State = ServerState.Failed;
+                                        if (benchmarksDir != null)
+                                        {
+                                            Debug.Assert(process == null);
+                                            process = await StartProcess(hostname, Path.Combine(tempDir, benchmarksDir), job, dotnetHome, standardOutput, standardError);
+
+                                            job.ProcessId = process.Id;
+
+                                            Log.WriteLine($"Process started: {process.Id}");
+
+                                            workingDirectory = process.StartInfo.WorkingDirectory;
+
+
+
+                                        }
+                                        else
+                                        {
+                                            workingDirectory = null;
+                                            Log.WriteLine($"Job failed with CloneRestoreAndBuild");
+                                            job.State = ServerState.Failed;
+                                        }
                                     }
                                 }
 
@@ -441,111 +567,147 @@ namespace BenchmarkServer
                                         // Pause the timer while we're running
                                         timer.Change(Timeout.Infinite, Timeout.Infinite);
 
-                                        var now = DateTime.UtcNow;
-
-                                        // Clean the job in case the driver is not running
-                                        if (now - job.LastDriverCommunicationUtc > TimeSpan.FromSeconds(30))
+                                        try
                                         {
-                                            Log.WriteLine($"Driver didn't communicate for {now - job.LastDriverCommunicationUtc}. Halting job.");
-                                            job.State = ServerState.Deleting;
-                                        }
+                                            var now = DateTime.UtcNow;
 
-                                        if (process != null)
-                                        {
-                                            if (process.HasExited)
+                                            // Clean the job in case the driver is not running
+                                            if (now - job.LastDriverCommunicationUtc > DriverTimeout)
                                             {
-                                                if (process.ExitCode != 0)
-                                                {
-                                                    Log.WriteLine($"Job failed");
+                                                Log.WriteLine($"Driver didn't communicate for {DriverTimeout}. Halting job. ({job.State})");
+                                                job.State = ServerState.Deleting;
+                                            }
 
-                                                    job.Error = "Job failed at runtime\n" + standardOutput.ToString();
-                                                    job.State = ServerState.Failed;
+                                            if (!String.IsNullOrEmpty(dockerImage))
+                                            {
+                                                string inspect = "";
+
+                                                // Check the container is still running
+                                                ProcessUtil.Run("docker", "inspect -f {{.State.Running}} " + dockerContainerId,
+                                                    outputDataReceived: d => inspect += d,
+                                                    log: false, throwOnError: false);
+
+                                                if (String.IsNullOrEmpty(inspect) || inspect.Contains("false"))
+                                                {
+                                                    job.State = ServerState.Stopping;
                                                 }
                                                 else
                                                 {
-                                                    if (job.State != ServerState.Stopped && job.State != ServerState.Deleting)
+                                                    // Get docker stats
+                                                    var stats = "";
+
+                                                    var result = ProcessUtil.Run("docker", "container stats --no-stream --format \"{{.CPUPerc}}-{{.MemUsage}}\" " + dockerContainerId,
+                                                        outputDataReceived: d => stats += d,
+                                                        log: false, throwOnError: false);
+
+                                                    if (!String.IsNullOrEmpty(stats))
                                                     {
-                                                        job.Output = standardOutput.ToString();
-                                                        job.State = ServerState.Stopped;
-                                                        Log.WriteLine($"Process has stopped");
+                                                        var data = stats.Trim().Split('-');
+
+                                                        // Format is {value}%
+                                                        var cpuPercentRaw = data[0];
+
+                                                        // Format is {used}M/GiB/{total}M/GiB
+                                                        var workingSetRaw = data[1];
+                                                        var usedMemoryRaw = workingSetRaw.Split('/')[0].Trim();
+                                                        var cpu = double.Parse(cpuPercentRaw.Trim('%'));
+
+                                                        // On Windows the CPU already takes the number or HT into account
+                                                        if (OperatingSystem == OperatingSystem.Linux)
+                                                        {
+                                                            cpu = cpu / Environment.ProcessorCount;
+                                                        }
+
+                                                        cpu = Math.Round(cpu);
+
+                                                        // MiB, GiB, B ?
+                                                        var factor = 1;
+                                                        double memory;
+
+                                                        if (usedMemoryRaw.EndsWith("GiB"))
+                                                        {
+                                                            factor = 1024 * 1024 * 1024;
+                                                            memory = double.Parse(usedMemoryRaw.Substring(0, usedMemoryRaw.Length - 3));
+                                                        }
+                                                        else if (usedMemoryRaw.EndsWith("MiB"))
+                                                        {
+                                                            factor = 1024 * 1024;
+                                                            memory = double.Parse(usedMemoryRaw.Substring(0, usedMemoryRaw.Length - 3));
+                                                        }
+                                                        else
+                                                        {
+                                                            memory = double.Parse(usedMemoryRaw.Substring(0, usedMemoryRaw.Length - 1));
+                                                        }
+
+                                                        var workingSet = (long)(memory * factor);
+
+                                                        job.AddServerCounter(new ServerCounter
+                                                        {
+                                                            Elapsed = now - startMonitorTime,
+                                                            WorkingSet = workingSet,
+                                                            CpuPercentage = cpu > 100 ? 0 : cpu
+                                                        });
                                                     }
                                                 }
                                             }
-                                            else
+                                            else if (process != null)
                                             {
-                                                // TODO: Accessing the TotalProcessorTime on OSX throws so just leave it as 0 for now
-                                                // We need to dig into this
-                                                var newCPUTime = OperatingSystem == OperatingSystem.OSX ? TimeSpan.Zero : process.TotalProcessorTime;
-                                                var elapsed = now.Subtract(lastMonitorTime).TotalMilliseconds;
-                                                var cpu = Math.Round((newCPUTime - oldCPUTime).TotalMilliseconds / (Environment.ProcessorCount * elapsed) * 100);
-                                                lastMonitorTime = now;
-
-                                                process.Refresh();
-
-                                                // Ignore first measure
-                                                if (oldCPUTime != TimeSpan.Zero)
+                                                if (process.HasExited)
                                                 {
-                                                    job.AddServerCounter(new ServerCounter
+                                                    if (process.ExitCode != 0)
                                                     {
-                                                        Elapsed = now - startMonitorTime,
-                                                        WorkingSet = process.WorkingSet64,
-                                                        CpuPercentage = cpu
-                                                    });
+                                                        Log.WriteLine($"Job failed");
+
+                                                        job.Error = $"Job failed at runtime:\n{standardError}";
+                                                        job.Output = standardOutput.ToString();
+
+                                                        if (job.State != ServerState.Deleting)
+                                                        {
+                                                            job.State = ServerState.Failed;
+                                                        }
+                                                    }
+                                                    else
+                                                    {
+                                                        Log.WriteLine($"Process has exited ({process.ExitCode})");
+
+                                                        // The output is assigned before the status is changed as the driver will stopped polling the job as soon as the Stopped state is detected
+                                                        job.Output = standardOutput.ToString();
+
+                                                        job.State = ServerState.Stopped;
+                                                    }
                                                 }
+                                                else
+                                                {
+                                                    // TODO: Accessing the TotalProcessorTime on OSX throws so just leave it as 0 for now
+                                                    // We need to dig into this
+                                                    var newCPUTime = OperatingSystem == OperatingSystem.OSX ? TimeSpan.Zero : process.TotalProcessorTime;
+                                                    var elapsed = now.Subtract(lastMonitorTime).TotalMilliseconds;
+                                                    var cpu = Math.Round((newCPUTime - oldCPUTime).TotalMilliseconds / (Environment.ProcessorCount * elapsed) * 100);
+                                                    lastMonitorTime = now;
 
-                                                oldCPUTime = newCPUTime;
+                                                    process.Refresh();
+
+                                                    // Ignore first measure
+                                                    if (oldCPUTime != TimeSpan.Zero)
+                                                    {
+                                                        job.AddServerCounter(new ServerCounter
+                                                        {
+                                                            Elapsed = now - startMonitorTime,
+                                                            WorkingSet = process.WorkingSet64,
+                                                            CpuPercentage = cpu
+                                                        });
+                                                    }
+
+                                                    oldCPUTime = newCPUTime;
+                                                }
                                             }
+
                                         }
-                                        else if (!String.IsNullOrEmpty(dockerImage))
+                                        finally
                                         {
-                                            var output = new StringBuilder();
-
-                                            // Get docker stats
-                                            var result = ProcessUtil.Run("docker", "container stats --no-stream --format \"{{.CPUPerc}}-{{.MemUsage}}\" " + dockerContainerId,
-                                                outputDataReceived: d => output.AppendLine(d),
-                                                log: false);
-
-                                            var data = output.ToString().Trim().Split('-');
-
-                                            // Format is {value}%
-                                            var cpuPercentRaw = data[0];
-
-                                            // Format is {used}M/GiB/{total}M/GiB
-                                            var workingSetRaw = data[1];
-                                            var usedMemoryRaw = workingSetRaw.Split('/')[0].Trim();
-                                            var cpu = Math.Round(double.Parse(cpuPercentRaw.Trim('%')) / Environment.ProcessorCount);
-
-                                            // MiB, GiB, B ?
-                                            var factor = 1;
-                                            double memory;
-
-                                            if (usedMemoryRaw.EndsWith("GiB"))
-                                            {
-                                                factor = 1024 * 1024 * 1024;
-                                                memory = double.Parse(usedMemoryRaw.Substring(0, usedMemoryRaw.Length - 3));
-                                            }
-                                            else if (usedMemoryRaw.EndsWith("MiB"))
-                                            {
-                                                factor = 1024 * 1024;
-                                                memory = double.Parse(usedMemoryRaw.Substring(0, usedMemoryRaw.Length - 3));
-                                            }
-                                            else
-                                            {
-                                                memory = double.Parse(usedMemoryRaw.Substring(0, usedMemoryRaw.Length - 1));
-                                            }
-
-                                            var workingSet = (long)(memory * factor);
-
-                                            job.AddServerCounter(new ServerCounter
-                                            {
-                                                Elapsed = now - startMonitorTime,
-                                                WorkingSet = workingSet,
-                                                CpuPercentage = cpu > 100 ? 0 : cpu
-                                            });
+                                            // Resume once we finished processing all connections
+                                            timer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
                                         }
-
-                                        // Resume once we finished processing all connections
-                                        timer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
                                     }
                                     finally
                                     {
@@ -569,6 +731,17 @@ namespace BenchmarkServer
 
                             await StopJobAsync();
                         }
+                        else if (job.State == ServerState.Stopped)
+                        {
+                            Log.WriteLine($"Job '{job.Id}' has stopped, waiting for the driver to delete it");
+
+                            if (DateTime.UtcNow - job.LastDriverCommunicationUtc > DriverTimeout)
+                            {
+                                // The job needs to be deleted
+                                Log.WriteLine($"Driver didn't communicate for {DriverTimeout}. Halting job. ({job.State})");
+                                job.State = ServerState.Deleting;
+                            }
+                        }
                         else if (job.State == ServerState.Deleting)
                         {
                             Log.WriteLine($"Deleting job '{job.Id}' with scenario '{job.Scenario}'");
@@ -582,7 +755,7 @@ namespace BenchmarkServer
                             {
                                 if (OperatingSystem == OperatingSystem.Windows)
                                 {
-                                    RunPerfview("stop /AcceptEula /NoNGenRundown /NoView", benchmarksDir);
+                                    RunPerfview($"stop /AcceptEula /NoNGenRundown /NoView {_startPerfviewArguments}", Path.Combine(tempDir, benchmarksDir));
                                 }
                                 else if (OperatingSystem == OperatingSystem.Linux)
                                 {
@@ -596,15 +769,38 @@ namespace BenchmarkServer
                         }
                         else if (job.State == ServerState.Starting)
                         {
-                            if (DateTime.UtcNow - startMonitorTime > TimeSpan.FromSeconds(30))
+                            if (DateTime.UtcNow - startMonitorTime > DriverTimeout)
                             {
                                 Log.WriteLine($"Job didn't start during the expected delay");
-                                job.State = ServerState.Stopping;
+                                job.State = ServerState.Failed;
+                                job.Error = "Job didn't start during the expected delay. Check that it outputs a startup message on the log.";
                             }
                         }
 
                         async Task StopJobAsync()
                         {
+                            // Check if we already passed here
+                            if (timer == null)
+                            {
+                                return;
+                            }
+
+                            // Releasing EventPipe
+                            if (eventPipeTask != null)
+                            {
+                                try
+                                {
+                                    if (process != null && !eventPipeTerminated && !!process.HasExited)
+                                    {
+                                        EventPipeClient.StopTracing(process.Id, eventPipeSessionId);
+                                    }
+                                }
+                                catch (EndOfStreamException)
+                                {
+                                    // If the app we're monitoring exits abruptly, this may throw in which case we just swallow the exception and exit gracefully.
+                                }
+                            }
+
                             lock (executionLock)
                             {
                                 disposed = true;
@@ -703,18 +899,35 @@ namespace BenchmarkServer
 
                                     } while (process != null && !process.HasExited);
                                 }
+
                                 Log.WriteLine($"Process has stopped");
+
+                                // The output is assigned before the status is changed as the driver will stopped polling the job as soon as the Stopped state is detected
+                                job.Output = standardOutput.ToString();
+
+                                job.State = ServerState.Stopped;
 
                                 process = null;
                             }
                             else if (!String.IsNullOrEmpty(dockerImage))
                             {
-                                DockerCleanUp(dockerContainerId, dockerImage);
-                                dockerImage = null;
+                                // The output is assigned before the status is changed as the driver will stopped polling the job as soon as the Stopped state is detected
+                                job.Output = standardOutput.ToString();
+
+                                DockerCleanUp(dockerContainerId, dockerImage, job);
                             }
 
-                            job.State = ServerState.Stopped;
-                            Log.WriteLine($"Process stopped");
+                            // Running AfterScript
+                            if (!String.IsNullOrEmpty(job.AfterScript))
+                            {
+                                var segments = job.AfterScript.Split(' ', 2);
+                                var processResult = ProcessUtil.Run(segments[0], segments.Length > 1 ? segments[1] : "", log: true, workingDirectory: workingDirectory);
+
+                                // TODO: Update the output with the result of AfterScript, and change the driver so that it polls the job a last time even when the job is stopped
+                                // if there is an AfterScript
+                            }
+
+                            Log.WriteLine($"Process stopped ({job.State})");
                         }
 
                         async Task DeleteJobAsync()
@@ -723,13 +936,7 @@ namespace BenchmarkServer
 
                             if (_cleanup && !job.NoClean && tempDir != null)
                             {
-                                DeleteDir(tempDir);
-                            }
-
-                            // If a custom dotnet directory was used, clean it
-                            if (_cleanup && !job.NoClean && dotnetDir != dotnetHome)
-                            {
-                                DeleteDir(dotnetDir);
+                                TryDeleteDir(tempDir, false);
                             }
 
                             tempDir = null;
@@ -737,14 +944,19 @@ namespace BenchmarkServer
                             _jobs.Remove(job.Id);
                         }
                     }
-                    await Task.Delay(100);
+
+                    await Task.Delay(1000);
                 }
+            }
+            catch (Exception e)
+            {
+                Log.WriteLine($"Unnexpected error: {e.ToString()}");
             }
             finally
             {
                 if (_cleanup && dotnetHome != null)
                 {
-                    DeleteDir(dotnetHome);
+                    TryDeleteDir(dotnetHome, false);
                 }
             }
         }
@@ -757,7 +969,7 @@ namespace BenchmarkServer
                 return null;
             }
 
-            Log.WriteLine($"Starting process '{_perfviewPath} {arguments}'");
+            Log.WriteLine($"Starting process '{_perfviewPath} {arguments}' in '{workingDirectory}'");
 
             var process = new Process()
             {
@@ -861,7 +1073,7 @@ namespace BenchmarkServer
             // Max delay for perfcollect to stop
             var delay = Task.Delay(30000);
 
-            while(!perfCollectProcess.HasExited && !delay.IsCompletedSuccessfully)
+            while (!perfCollectProcess.HasExited && !delay.IsCompletedSuccessfully)
             {
                 await Task.Delay(1000);
             }
@@ -902,23 +1114,92 @@ namespace BenchmarkServer
 
         }
 
-        private static async Task<(string containerId, string imageName)> DockerBuildAndRun(string path, ServerJob job, string hostname)
+        private static void ConvertLines(string path)
+        {
+            Log.WriteLine($"Converting '{path}' ...");
+
+            var content = File.ReadAllText(path);
+
+            if (path.IndexOf("\r\n") >= 0)
+            {
+                File.WriteAllText(path, path.Replace("\r\n", "\n"));
+            }
+        }
+
+        private static async Task<(string containerId, string imageName, string workingDirectory)> DockerBuildAndRun(string path, ServerJob job, string hostname, StringBuilder standardOutput, CancellationToken cancellationToken = default(CancellationToken))
         {
             var source = job.Source;
+            string srcDir;
+
             // Docker image names must be lowercase
             var imageName = $"benchmarks_{source.DockerImageName}".ToLowerInvariant();
-            var cloneDir = Path.Combine(path, Git.Clone(path, source.Repository));
-            var workingDirectory = Path.Combine(cloneDir, source.DockerContextDirectory);
 
-            if (!string.IsNullOrEmpty(source.BranchOrCommit))
+            if (source.SourceCode != null)
             {
-                Git.Checkout(cloneDir, source.BranchOrCommit);
+                srcDir = Path.Combine(path, "src");
+                Log.WriteLine($"Extracting source code to {srcDir}");
+
+                ZipFile.ExtractToDirectory(job.Source.SourceCode.TempFilename, srcDir);
+
+                // Convert CRLF to LF on Linux
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                {
+                    Log.WriteLine($"Converting text files ...");
+
+                    foreach (var file in Directory.GetFiles(srcDir + Path.DirectorySeparatorChar, "*.*", SearchOption.AllDirectories))
+                    {
+                        ConvertLines(file);
+                    }
+                }
+
+                File.Delete(job.Source.SourceCode.TempFilename);
+            }
+            else
+            {
+                var branchAndCommit = source.BranchOrCommit.Split('#', 2);
+
+                var dir = Git.Clone(path, source.Repository, shallow: branchAndCommit.Length == 1, branch: branchAndCommit[0]);
+
+                srcDir = Path.Combine(path, dir);
+
+                if (branchAndCommit.Length > 1)
+                {
+                    Git.Checkout(srcDir, branchAndCommit[1]);
+                }
+
+                if (source.InitSubmodules)
+                {
+                    Git.InitSubModules(srcDir);
+                }
             }
 
-            ProcessUtil.Run("docker", $"build --pull --no-cache -t {imageName} -f {source.DockerFile} {workingDirectory}", workingDirectory: cloneDir);
+            var workingDirectory = Path.Combine(srcDir, source.DockerContextDirectory);
 
-            // Only run on the host network on linux
-            var useHostNetworking = OperatingSystem == OperatingSystem.Linux;
+            job.BasePath = workingDirectory;
+
+            // Running BeforeScript
+            if (!String.IsNullOrEmpty(job.BeforeScript))
+            {
+                var segments = job.BeforeScript.Split(' ', 2);
+                var processResult = ProcessUtil.Run(segments[0], segments.Length > 1 ? segments[1] : "", workingDirectory: workingDirectory, log: true);
+                standardOutput.AppendLine(processResult.StandardOutput);
+            }
+
+            var stopwatch = new Stopwatch();
+            stopwatch.Start();
+
+            ProcessUtil.Run("docker", $"build --pull -t {imageName} -f {source.DockerFile} {workingDirectory}", workingDirectory: srcDir, timeout: BuildTimeout, cancellationToken: cancellationToken, log: true);
+            
+            stopwatch.Stop();
+
+            job.BuildTime = stopwatch.Elapsed;
+
+            stopwatch.Reset();
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return (null, null, null);
+            }
 
             var environmentArguments = "";
 
@@ -927,70 +1208,113 @@ namespace BenchmarkServer
                 environmentArguments += $"--env {env.Key}={env.Value} ";
             }
 
-            var command = useHostNetworking ? $"run -d {environmentArguments} {job.Arguments} --network host {imageName}" :
-                                              $"run -d {environmentArguments} {job.Arguments} -p {job.Port}:{job.Port} {imageName}";
+            // Delete container if the same name already exists
+            ProcessUtil.Run("docker", $"rm {imageName}", throwOnError: false);
 
-            var result = ProcessUtil.Run("docker", $"{command} ");
+            var command = OperatingSystem == OperatingSystem.Linux
+                ? $"run -d {environmentArguments} {job.Arguments} --mount type=bind,source=/mnt,target=/tmp --name {imageName} --privileged --network host {imageName}"
+                : $"run -d {environmentArguments} {job.Arguments} --name {imageName} --network SELF --ip {hostname} {imageName}";
+
+            
+
+            if (job.Collect && job.CollectStartup)
+            {
+                StartCollection(workingDirectory, job);
+            }
+
+            var result = ProcessUtil.Run("docker", $"{command} ", throwOnError: false, onStart: () => stopwatch.Start());
+
             var containerId = result.StandardOutput.Trim();
             job.Url = ComputeServerUrl(hostname, job);
 
-            if (!String.IsNullOrEmpty(job.ReadyStateText))
-            {
-                Log.WriteLine($"Waiting for startup signal: '{job.ReadyStateText}'...");
+            Log.WriteLine($"Intercepting Docker logs for '{containerId}' ...");
 
-                var process = new Process()
-                {
-                    StartInfo = {
+            var process = new Process()
+            {
+                StartInfo = {
                     FileName = "docker",
                     Arguments = $"logs -f {containerId}",
                     WorkingDirectory = workingDirectory,
                     RedirectStandardOutput = true,
                     UseShellExecute = false,
                 },
-                    EnableRaisingEvents = true
-                };
+                EnableRaisingEvents = true
+            };
+
+            process.Start();
+            process.BeginOutputReadLine();
+
+            if (!String.IsNullOrEmpty(job.ReadyStateText))
+            {
+                Log.WriteLine($"Waiting for startup signal: '{job.ReadyStateText}'...");
 
                 process.OutputDataReceived += (_, e) =>
                 {
                     if (e != null && e.Data != null)
                     {
                         Log.WriteLine(e.Data);
+                        standardOutput.AppendLine(e.Data);
 
-                        if (job.State == ServerState.Starting && e.Data.IndexOf(job.ReadyStateText, StringComparison.OrdinalIgnoreCase) >= 0)
+                        if (job.State == ServerState.Starting &&
+                            ((e.Data.IndexOf(job.ReadyStateText, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                                e.Data.ToLowerInvariant().Contains("started") ||
+                                e.Data.ToLowerInvariant().Contains("listening")))
                         {
-                            Log.WriteLine($"Application is now running...");
-                            job.State = ServerState.Running;
+                            Log.WriteLine($"Ready state detected, application is now running...");
+                            MarkAsRunning(hostname, job, stopwatch);
+
+                            if (job.Collect && !job.CollectStartup)
+                            {
+                                StartCollection(workingDirectory, job);
+                            }
                         }
                     }
                 };
-
-                process.Start();
-                process.BeginOutputReadLine();
             }
             else
             {
-                Log.WriteLine($"Waiting for application to startup...");
+                Log.WriteLine($"Trying to contact the application ...");
+
+                process.OutputDataReceived += (_, e) =>
+                {
+                    if (e != null && e.Data != null)
+                    {
+                        Log.WriteLine(e.Data);
+                        standardOutput.AppendLine(e.Data);
+                    }
+                };
 
                 // Wait until the service is reachable to avoid races where the container started but isn't
                 // listening yet. If it keeps failing we ignore it. If the port is unreachable then clients
                 // will fail to connect and the job will be cleaned up properly
                 if (await WaitToListen(job, hostname, 30))
                 {
-                    Log.WriteLine($"Application is now running...");
+                    Log.WriteLine($"Application is responding...");
                 }
                 else
                 {
                     Log.WriteLine($"Application MAY be running, continuing...");
                 }
 
-                job.State = ServerState.Running;
+                MarkAsRunning(hostname, job, stopwatch);
+
+                if (job.Collect && !job.CollectStartup)
+                {
+                    StartCollection(workingDirectory, job);
+                }
             }
 
-            return (containerId, imageName);
+            return (containerId, imageName, workingDirectory);
         }
 
         private static async Task<bool> WaitToListen(ServerJob job, string hostname, int maxRetries = 5)
         {
+            if (job.IsConsoleApp)
+            {
+                Log.WriteLine($"Console application detected, not waiting");
+                return true;
+            }
+
             for (var i = 1; i <= maxRetries; ++i)
             {
                 try
@@ -1015,17 +1339,43 @@ namespace BenchmarkServer
             return false;
         }
 
-        private static void DockerCleanUp(string containerId, string imageName)
+        private static void DockerCleanUp(string containerId, string imageName, ServerJob job)
         {
-            var result = ProcessUtil.Run("docker", $"logs {containerId}");
-            Console.WriteLine(result.StandardOutput);
+            var state = ProcessUtil.Run("docker", "inspect -f {{.State.Running}} " + containerId, throwOnError: false)?.StandardOutput;
 
-            ProcessUtil.Run("docker", $"stop {containerId}");
+            // container is already stopped
+            if (state.Contains("false"))
+            {
+                if (ProcessUtil.Run("docker", "inspect -f {{.State.ExitCode}} " + containerId, throwOnError: false)?.StandardOutput.Trim() != "0")
+                {
+                    Log.WriteLine("Job failed");
+                    job.Error = ProcessUtil.Run("docker", "logs " + containerId, throwOnError: false)?.StandardError;
+                    job.State = ServerState.Failed;
+                }
+                else
+                {
+                    job.State = ServerState.Stopped;
+                }
+            }
+            else
+            {
+                ProcessUtil.Run("docker", $"stop {containerId}", throwOnError: false);
 
-            ProcessUtil.Run("docker", $"rmi --force {imageName}");
+                job.State = ServerState.Stopped;
+            }
+
+            if (job.NoClean)
+            {
+                ProcessUtil.Run("docker", $"rmi --force --no-prune {imageName}", throwOnError: false);
+            }
+            else
+            {
+                ProcessUtil.Run("docker", $"rm {imageName}", throwOnError: false);
+                ProcessUtil.Run("docker", $"rmi --force {imageName}", throwOnError: false);
+            }
         }
 
-        private static async Task<(string benchmarkDir, string dotnetDir)> CloneRestoreAndBuild(string path, ServerJob job, string dotnetHome)
+        private static async Task<string> CloneRestoreAndBuild(string path, ServerJob job, string dotnetHome)
         {
             // Clone
             string benchmarkedDir = null;
@@ -1054,18 +1404,26 @@ namespace BenchmarkServer
 
                 foreach (var source in repos)
                 {
-                    var dir = Git.Clone(path, source.Repository);
+                    var branchAndCommit = source.BranchOrCommit.Split('#', 2);
+
+                    var dir = Git.Clone(path, source.Repository, shallow: branchAndCommit.Length == 1, branch: branchAndCommit[0]);
+
+                    var srcDir = Path.Combine(path, dir);
+
                     if (SourceRepoComparer.Instance.Equals(source, job.Source))
                     {
                         benchmarkedDir = dir;
                     }
 
-                    if (!string.IsNullOrEmpty(source.BranchOrCommit))
+                    if (branchAndCommit.Length > 1)
                     {
-                        Git.Checkout(Path.Combine(path, dir), source.BranchOrCommit);
+                        Git.Checkout(srcDir, branchAndCommit[1]);
                     }
 
-                    Git.InitSubModules(Path.Combine(path, dir));
+                    if (source.InitSubmodules)
+                    {
+                        Git.InitSubModules(srcDir);
+                    }
                 }
             }
 
@@ -1092,182 +1450,300 @@ namespace BenchmarkServer
                 Directory.CreateDirectory(buildToolsPath);
             }
 
-            Log.WriteLine("Installing dotnet runtimes and sdk");
+            Log.WriteLine($"Installing dotnet runtimes and sdk");
 
             // Computes the location of the benchmarked app
-            var benchmarkedApp = Path.Combine(path, benchmarkedDir, Path.GetDirectoryName(job.Source.Project));
-
-            // In theory the actual latest runtime version should be taken from the dependencies.pros file from
-            // https://dotnet.myget.org/feed/aspnetcore-dev/package/nuget/Internal.AspNetCore.Universe.Lineup
-            // however this is different only if the coherence build didn't go through.
+            var benchmarkedApp = Path.Combine(path, benchmarkedDir, Path.GetDirectoryName(FormatPathSeparators(job.Source.Project)));
 
             // Define which Runtime and SDK will be installed.
 
             string targetFramework;
             string runtimeVersion;
             string aspNetCoreVersion;
-            string actualAspNetCoreVersion;
+            string channel;
 
-            if (!String.Equals(job.RuntimeVersion, "Current", StringComparison.OrdinalIgnoreCase))
+            // Default targetFramework (Latest)
+            targetFramework = LatestTargetFramework;
+
+            if (String.Equals(job.RuntimeVersion, "Current", StringComparison.OrdinalIgnoreCase))
             {
-                // Default targetFramework
-                targetFramework = "netcoreapp2.2";
+                runtimeVersion = await GetRuntimeChannelVersion(CurrentChannel);
+                targetFramework = CurrentTargetFramework;
+                channel = CurrentChannel;
+            }
+            else if (String.Equals(job.RuntimeVersion, "Latest", StringComparison.OrdinalIgnoreCase))
+            {
+                // Get the version that is defined by the ASP.NET repository
+                // Note: to use the latest version available, use a value like 3.0.*
+                runtimeVersion = await GetAspNetRuntimeVersion(buildToolsPath, LatestTargetFramework);
+                channel = LatestChannel;
+            }
+            else
+            {
+                // Custom version
+                runtimeVersion = job.RuntimeVersion;
 
-                if (String.Equals(job.RuntimeVersion, "Latest", StringComparison.OrdinalIgnoreCase))
+                if (runtimeVersion.EndsWith("*", StringComparison.Ordinal))
                 {
-                    runtimeVersion = await GetLatestRuntimeVersion(buildToolsPath);
+                    // Prefixed version
+                    // Detect the latest available version with this prefix
+
+                    channel = String.Join(".", runtimeVersion.Split('.').Take(2));
+
+                    runtimeVersion = await GetFlatContainerVersion(_latestRuntimeApiUrl, runtimeVersion.TrimEnd('*'));
                 }
-                else if (String.Equals(job.RuntimeVersion, "Edge", StringComparison.OrdinalIgnoreCase))
+                else if (runtimeVersion.Split('.').Length == 2)
                 {
-                    runtimeVersion = await GetEdgeRuntimeVersion(buildToolsPath);
+                    // Channel version with a prefix, e.g. 2.1
+                    channel = runtimeVersion;
+                    runtimeVersion = await GetRuntimeChannelVersion(runtimeVersion);
                 }
                 else
                 {
-                    // Custom version
-                    runtimeVersion = job.RuntimeVersion;
+                    // Specific version
+                    channel = String.Join(".", runtimeVersion.Split('.').Take(2));
+                }
 
-                    if (runtimeVersion.StartsWith("2.0"))
-                    {
-                        targetFramework = "netcoreapp2.0";
-                    }
-                    else if (runtimeVersion.StartsWith("2.1"))
-                    {
-                        targetFramework = "netcoreapp2.1";
-                    }
-                    else if (runtimeVersion.StartsWith("3.0"))
-                    {
-                        targetFramework = "netcoreapp3.0";
-                    }
+                if (runtimeVersion.StartsWith("2.1"))
+                {
+                    targetFramework = "netcoreapp2.1";
+                }
+                else if (runtimeVersion.StartsWith("2.2"))
+                {
+                    targetFramework = "netcoreapp2.2";
+                }
+                else if (runtimeVersion.StartsWith("3.0"))
+                {
+                    targetFramework = "netcoreapp3.0";
+                }
+            }
+
+            // If a specific framework is set, use it instead of the detected one
+            if (!String.IsNullOrEmpty(job.Framework))
+            {
+                targetFramework = job.Framework;
+            }
+
+            string sdkVersion;
+
+            if (!String.IsNullOrEmpty(job.SdkVersion))
+            {
+                if (String.Equals(job.SdkVersion, "stable", StringComparison.OrdinalIgnoreCase))
+                {
+                    sdkVersion = await GetReleasedSdkChannelVersion(channel);
+                    Log.WriteLine($"Using stable channel SDK version: {sdkVersion}");
+                }
+                else if (String.Equals(job.SdkVersion, "latest", StringComparison.OrdinalIgnoreCase))
+                {
+                    sdkVersion = await ParseLatestVersionFile(String.Format(_sdkVersionUrl, "release/3.0.1xx"));
+                    Log.WriteLine($"Detecting latest SDK version (release/3.0.1xx): {sdkVersion}");
+                }
+                else if (String.Equals(job.SdkVersion, "edge", StringComparison.OrdinalIgnoreCase))
+                {
+                    sdkVersion = await ParseLatestVersionFile(String.Format(_sdkVersionUrl, "master"));
+                    Log.WriteLine($"Detecting edge SDK version (master branch): {sdkVersion}");
+                }
+                else
+                {
+                    sdkVersion = job.SdkVersion;
+                    Log.WriteLine($"Using specified SDK version: {sdkVersion}");
                 }
             }
             else
             {
-                runtimeVersion = await GetCurrentRuntimeVersion(buildToolsPath);
-                targetFramework = CurrentTargetFramework;
+                if (runtimeVersion.StartsWith("3.0"))
+                {
+                    sdkVersion = (await DownloadContentAsync(_buildToolsSdk)).Trim();
+                    Log.WriteLine($"Detecting compatible SDK version: {sdkVersion}");
+                }
+                else
+                {
+                    sdkVersion = await GetReleasedSdkChannelVersion(channel);
+                    Log.WriteLine($"Using stable channel SDK version: {sdkVersion}");
+                }
             }
 
-            var sdkVersion = (await ReadUrlStringAsync(_sdkVersionUrl, maxRetries: 5)).Trim();
-            Log.WriteLine($"Detecting compatible SDK version: {sdkVersion}");
+            if (job.NoGlobalJson)
+            {
+                Log.WriteLine($"Skipping global.json");
+            }
+            else
+            {
+                // Looking for the first existing global.json file to update it as we can't have two in the same hierarchy
 
-            var globalJson = "{ \"sdk\": { \"version\": \"" + sdkVersion + "\" } }";
-            Log.WriteLine($"Writing global.json with content: {globalJson}");
-            File.WriteAllText(Path.Combine(benchmarkedApp, "global.json"), globalJson);
+                var globalJsonPath = new DirectoryInfo(benchmarkedApp);
+
+                bool globalJsonFound;
+                bool reachedRoot;
+
+                do
+                {
+                    reachedRoot = globalJsonPath.FullName != new DirectoryInfo(path).FullName;
+                    globalJsonFound = File.Exists(Path.Combine(globalJsonPath.FullName, "global.json"));
+                    globalJsonPath = globalJsonPath.Parent;
+                }
+                while (!globalJsonFound && !reachedRoot);
+
+                // No global.json found
+                if (!globalJsonFound)
+                {
+                    var globalJson = "{ \"sdk\": { \"version\": \"" + sdkVersion + "\" } }";
+                    Log.WriteLine($"Writing global.json with content: {globalJson}");
+                    File.WriteAllText(Path.Combine(benchmarkedApp, "global.json"), globalJson);
+                }
+                else
+                {
+                    // File found, we need to update it
+                    var globalJsonFilename = Path.Combine(globalJsonPath.FullName, "global.json");
+                    var globalObject = JObject.Parse(File.ReadAllText(globalJsonFilename));
+                    ((JProperty)globalObject["sdk"]["version"]).Value = new JValue(sdkVersion);
+                    var globalJson = globalObject.ToString();
+                    Log.WriteLine($"Updating '{globalJsonFilename}' with content: {globalJson}");
+                    File.WriteAllText(globalJsonFilename, globalJson);
+                }
+            }
 
             // Define which ASP.NET Core packages version to use
-            switch (job.AspNetCoreVersion.ToLowerInvariant())
+
+            if (String.Equals(job.AspNetCoreVersion, "Current", StringComparison.OrdinalIgnoreCase))
             {
-                case "current":
-                    aspNetCoreVersion = "2.1.*";
-                    actualAspNetCoreVersion = CurrentAspNetCoreVersion;
-                    break;
-                case "latest":
-                    aspNetCoreVersion = "2.2-*";
-                    actualAspNetCoreVersion = await GetLatestAspNetCoreRuntimeVersion(buildToolsPath);
-                    break;
-                default:
-                    aspNetCoreVersion = job.AspNetCoreVersion;
-                    actualAspNetCoreVersion = aspNetCoreVersion;
-                    break;
+                aspNetCoreVersion = await GetLatestPackageVersion(_currentAspNetApiUrl, CurrentChannel + ".");
+            }
+            else if (String.Equals(job.AspNetCoreVersion, "Latest", StringComparison.OrdinalIgnoreCase))
+            {
+                aspNetCoreVersion = await GetFlatContainerVersion(_aspnetFlatContainerUrl, LatestChannel + ".");
+            }
+            else
+            {
+                // Custom version
+                aspNetCoreVersion = job.AspNetCoreVersion;
+
+                if (aspNetCoreVersion.EndsWith("*", StringComparison.Ordinal))
+                {
+                    // Prefixed version
+                    // Detect the latest available version with this prefix
+
+                    aspNetCoreVersion = await GetFlatContainerVersion(_aspnetFlatContainerUrl, aspNetCoreVersion.TrimEnd('*'));
+                }
+                else if (aspNetCoreVersion.Split('.').Length == 2)
+                {
+                    // Channel version with a prefix, e.g. 2.1
+                    aspNetCoreVersion = await GetLatestPackageVersion(_currentAspNetApiUrl, aspNetCoreVersion + ".");
+                }
             }
 
-            if (OperatingSystem == OperatingSystem.Windows)
+            Log.WriteLine($"Detected ASP.NET version: {aspNetCoreVersion}");
+
+            var installAspNetSharedFramework = job.UseRuntimeStore || aspNetCoreVersion.StartsWith("3.0");
+
+            var dotnetInstallStep = "";
+
+            try
             {
-                if (!_installedRuntimes.Contains("Current"))
+                if (OperatingSystem == OperatingSystem.Windows)
                 {
-                    // Install latest stable 2.0 SDK version (and associated runtime)
-                    ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("powershell", $"-NoProfile -ExecutionPolicy unrestricted .\\dotnet-install.ps1 -Channel Current -NoPath -SkipNonVersionedFiles",
+                    if (!_installedSdks.Contains(sdkVersion))
+                    {
+                        dotnetInstallStep = $"SDK version '{sdkVersion}'";
+
+                        // Install latest SDK version (and associated runtime)
+                        ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("powershell", $"-NoProfile -ExecutionPolicy unrestricted .\\dotnet-install.ps1 -Version {sdkVersion} -NoPath -SkipNonVersionedFiles -InstallDir {dotnetHome}",
+                        log: true,
                         workingDirectory: _dotnetInstallPath,
                         environmentVariables: env));
 
-                    _installedRuntimes.Add("Current");
+                        _installedSdks.Add(sdkVersion);
+                    }
+
+                    if (!_installedRuntimes.Contains(runtimeVersion))
+                    {
+                        dotnetInstallStep = $"Core CLR version '{runtimeVersion}'";
+
+                        // Install runtime required for this scenario
+                        ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("powershell", $"-NoProfile -ExecutionPolicy unrestricted .\\dotnet-install.ps1 -Version {runtimeVersion} -Runtime dotnet -NoPath -SkipNonVersionedFiles -InstallDir {dotnetHome}",
+                        log: true,
+                        workingDirectory: _dotnetInstallPath,
+                        environmentVariables: env));
+
+                        _installedRuntimes.Add(runtimeVersion);
+                    }
+
+                    // The aspnet core runtime is only available for >= 2.1, in 2.0 the dlls are contained in the runtime store
+                    if (installAspNetSharedFramework && !_installedAspNetRuntimes.Contains(aspNetCoreVersion))
+                    {
+                        dotnetInstallStep = $"ASP.NET version '{aspNetCoreVersion}'";
+
+                        // Install aspnet runtime required for this scenario
+                        ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("powershell", $"-NoProfile -ExecutionPolicy unrestricted .\\dotnet-install.ps1 -Version {aspNetCoreVersion} -Runtime aspnetcore -NoPath -SkipNonVersionedFiles -InstallDir {dotnetHome}",
+                        log: true,
+                        workingDirectory: _dotnetInstallPath,
+                        environmentVariables: env));
+
+                        _installedAspNetRuntimes.Add(aspNetCoreVersion);
+                    }
                 }
-
-                if (!_installedSdks.Contains(sdkVersion))
+                else
                 {
-                    // Install latest SDK version (and associated runtime)
-                    ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("powershell", $"-NoProfile -ExecutionPolicy unrestricted .\\dotnet-install.ps1 -Version {sdkVersion} -NoPath -SkipNonVersionedFiles",
-                    workingDirectory: _dotnetInstallPath,
-                    environmentVariables: env));
+                    if (!_installedSdks.Contains(sdkVersion))
+                    {
+                        dotnetInstallStep = $"SDK version '{sdkVersion}'";
 
-                    _installedSdks.Add(sdkVersion);
-                }
+                        // Install latest SDK version (and associated runtime)
+                        ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("/usr/bin/env", $"bash dotnet-install.sh --version {sdkVersion} --no-path --skip-non-versioned-files --install-dir {dotnetHome}",
+                        log: true,
+                        workingDirectory: _dotnetInstallPath,
+                        environmentVariables: env));
+                        _installedSdks.Add(sdkVersion);
+                    }
 
-                if (!_installedRuntimes.Contains(runtimeVersion))
-                {
-                    // Install runtime required for this scenario
-                    ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("powershell", $"-NoProfile -ExecutionPolicy unrestricted .\\dotnet-install.ps1 -Version {runtimeVersion} -Runtime dotnet -NoPath -SkipNonVersionedFiles",
-                    workingDirectory: _dotnetInstallPath,
-                    environmentVariables: env));
+                    if (!_installedRuntimes.Contains(runtimeVersion))
+                    {
+                        dotnetInstallStep = $"Core CLR version '{runtimeVersion}'";
 
-                    _installedRuntimes.Add(runtimeVersion);
-                }
+                        // Install required runtime 
+                        ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("/usr/bin/env", $"bash dotnet-install.sh --version {runtimeVersion} --runtime dotnet --no-path --skip-non-versioned-files --install-dir {dotnetHome}",
+                        log: true,
+                        workingDirectory: _dotnetInstallPath,
+                        environmentVariables: env));
 
-                // The aspnet core runtime is only available for >= 2.1, in 2.0 the dlls are contained in the runtime store
-                if (job.UseRuntimeStore && targetFramework != "netcoreapp2.0" && !_installedAspNetRuntimes.Contains(actualAspNetCoreVersion))
-                {
-                    // Install aspnet runtime required for this scenario
-                    ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("powershell", $"-NoProfile -ExecutionPolicy unrestricted .\\dotnet-install.ps1 -Version {actualAspNetCoreVersion} -Runtime aspnetcore -NoPath -SkipNonVersionedFiles",
-                    workingDirectory: _dotnetInstallPath,
-                    environmentVariables: env));
+                        _installedRuntimes.Add(runtimeVersion);
+                    }
 
-                    _installedAspNetRuntimes.Add(actualAspNetCoreVersion);
+                    // The aspnet core runtime is only available for >= 2.1, in 2.0 the dlls are contained in the runtime store
+                    if (installAspNetSharedFramework && !_installedAspNetRuntimes.Contains(aspNetCoreVersion))
+                    {
+                        dotnetInstallStep = $"ASP.NET version '{aspNetCoreVersion}'";
+
+                        // Install required runtime 
+                        ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("/usr/bin/env", $"bash dotnet-install.sh --version {aspNetCoreVersion} --runtime aspnetcore --no-path --skip-non-versioned-files --install-dir {dotnetHome}",
+                        log: true,
+                        workingDirectory: _dotnetInstallPath,
+                        environmentVariables: env));
+
+                        _installedAspNetRuntimes.Add(aspNetCoreVersion);
+                    }
                 }
             }
-            else
+            catch
             {
-                if (!_installedRuntimes.Contains("Current"))
-                {
-                    // Install latest stable SDK version (and associated runtime)
-                    ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("/usr/bin/env", $"bash dotnet-install.sh --channel Current --no-path --skip-non-versioned-files",
-                    workingDirectory: _dotnetInstallPath,
-                    environmentVariables: env));
-                    _installedRuntimes.Add("Current");
-                }
+                job.Error = $"dotnet-install could not install this runtime: {dotnetInstallStep}";
 
-                if (!_installedSdks.Contains(sdkVersion))
-                {
-                    // Install latest SDK version (and associated runtime)
-                    ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("/usr/bin/env", $"bash dotnet-install.sh --version {sdkVersion} --no-path --skip-non-versioned-files",
-                    workingDirectory: _dotnetInstallPath,
-                    environmentVariables: env));
-                    _installedSdks.Add(sdkVersion);
-                }
-
-                if (!_installedRuntimes.Contains(runtimeVersion))
-                {
-                    // Install runtime required by coherence universe
-                    ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("/usr/bin/env", $"bash dotnet-install.sh --version {runtimeVersion} --runtime dotnet --no-path --skip-non-versioned-files",
-                    workingDirectory: _dotnetInstallPath,
-                    environmentVariables: env));
-
-                    _installedRuntimes.Add(runtimeVersion);
-                }
-
-                // The aspnet core runtime is only available for >= 2.1, in 2.0 the dlls are contained in the runtime store
-                if (job.UseRuntimeStore && targetFramework != "netcoreapp2.0" && !_installedAspNetRuntimes.Contains(actualAspNetCoreVersion))
-                {
-                    // Install runtime required by coherence universe
-                    ProcessUtil.RetryOnException(3, () => ProcessUtil.Run("/usr/bin/env", $"bash dotnet-install.sh --version {actualAspNetCoreVersion} --runtime aspnetcore --no-path --skip-non-versioned-files",
-                    workingDirectory: _dotnetInstallPath,
-                    environmentVariables: env));
-
-                    _installedAspNetRuntimes.Add(actualAspNetCoreVersion);
-                }
+                return null;
             }
 
             var dotnetDir = dotnetHome;
 
             // Updating ServerJob to reflect actual versions used
-            job.AspNetCoreVersion = actualAspNetCoreVersion;
+            job.AspNetCoreVersion = aspNetCoreVersion;
             job.RuntimeVersion = runtimeVersion;
             job.SdkVersion = sdkVersion;
 
             // Build and Restore
             var dotnetExecutable = GetDotNetExecutable(dotnetDir);
 
-            var buildParameters = $"/p:BenchmarksAspNetCoreVersion={actualAspNetCoreVersion} " +
-                $"/p:MicrosoftAspNetCoreAllPackageVersion={actualAspNetCoreVersion} " +
-                $"/p:MicrosoftAspNetCoreAppPackageVersion={actualAspNetCoreVersion} " +
+            var buildParameters = $"/p:BenchmarksAspNetCoreVersion={aspNetCoreVersion} " +
+                $"/p:MicrosoftAspNetCoreAllPackageVersion={aspNetCoreVersion} " +
+                $"/p:MicrosoftAspNetCoreAppPackageVersion={aspNetCoreVersion} " +
                 $"/p:BenchmarksNETStandardImplicitPackageVersion={aspNetCoreVersion} " +
                 $"/p:BenchmarksNETCoreAppImplicitPackageVersion={aspNetCoreVersion} " +
                 $"/p:BenchmarksRuntimeFrameworkVersion={runtimeVersion} " +
@@ -1275,15 +1751,7 @@ namespace BenchmarkServer
                 $"/p:MicrosoftNETCoreAppPackageVersion={runtimeVersion} " +
                 $"/p:NETCoreAppMaximumVersion=99.9 "; // Force the SDK to accept the TFM even if it's an unknown one. For instance using SDK 2.1 to build a netcoreapp2.2 TFM.
 
-            if (targetFramework == "netcoreapp2.0")
-            {
-                buildParameters += $"/p:MicrosoftNETCoreApp20PackageVersion={runtimeVersion} ";
-                if (!job.UseRuntimeStore)
-                {
-                    buildParameters += $"/p:PublishWithAspNetCoreTargetManifest=false ";
-                }
-            }
-            else if (targetFramework == "netcoreapp2.1")
+            if (targetFramework == "netcoreapp2.1")
             {
                 buildParameters += $"/p:MicrosoftNETCoreApp21PackageVersion={runtimeVersion} ";
                 if (!job.UseRuntimeStore)
@@ -1312,10 +1780,10 @@ namespace BenchmarkServer
                 throw new NotSupportedException($"Unsupported framework: {targetFramework}");
             }
 
-            // Apply custom build properties sent from the driver
-            foreach (var bp in job.BuildProperties)
+            // Apply custom build arguments sent from the driver
+            foreach (var argument in job.BuildArguments)
             {
-                buildParameters += $"/p:{bp.Key}={bp.Value} ";
+                buildParameters += $"{argument} ";
             }
 
             // Specify tfm in case the project targets multiple one
@@ -1331,17 +1799,44 @@ namespace BenchmarkServer
                 }
                 else
                 {
-                    buildParameters += "-r linux-x64 ";
+                    if (job.Hardware == Hardware.ARM64)
+                    {
+                        buildParameters += "-r linux-arm64 ";
+                    }
+                    else
+                    {
+                        buildParameters += "-r linux-x64 ";
+                    }                    
                 }
             }
 
+            // Copye build files before building/publishing
+            foreach (var attachment in job.BuildAttachments)
+            {
+                var filename = Path.Combine(benchmarkedApp, attachment.Filename.Replace("\\", "/"));
+
+                Log.WriteLine($"Creating build file: {filename}");
+
+                if (File.Exists(filename))
+                {
+                    File.Delete(filename);
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(filename));
+
+                File.Copy(attachment.TempFilename, filename);
+                File.Delete(attachment.TempFilename);
+            }
+
             var outputFolder = Path.Combine(benchmarkedApp, "published");
-
-            var startPublish = DateTime.UtcNow;
-
-            var arguments = $"publish -c Release -o {outputFolder} {buildParameters}";
+            var projectFileName = Path.GetFileName(FormatPathSeparators(job.Source.Project));
+                        
+            var arguments = $"publish {projectFileName} -c Release -o {outputFolder} {buildParameters}";
 
             Log.WriteLine($"Publishing application in {outputFolder} with: \n {arguments}");
+
+            var stopwatch = new Stopwatch();
+            stopwatch.Start();
 
             var buildResults = ProcessUtil.Run(dotnetExecutable, arguments,
                 workingDirectory: benchmarkedApp,
@@ -1354,55 +1849,87 @@ namespace BenchmarkServer
                     buildResults.StandardOutput + "\n" +
                     buildResults.StandardError;
 
-                return (null, null);
+                return null;
             }
 
-            Log.WriteLine($"Application published successfully in {DateTime.UtcNow - startPublish}");
+            stopwatch.Stop();
+
+            job.BuildTime = stopwatch.Elapsed;
+
+            Log.WriteLine($"Application published successfully in {job.BuildTime.TotalMilliseconds} ms");
+
+            job.PublishedSize = DirSize(new DirectoryInfo(outputFolder));
+
+            if (job.PublishedSize != 0)
+            {
+                job.PublishedSize = job.PublishedSize / 1024;
+            }
+
+            Log.WriteLine($"Published size: {job.PublishedSize}");
 
             // Copy crossgen in the app folder
             if (job.Collect && OperatingSystem == OperatingSystem.Linux)
             {
                 Log.WriteLine("Copying crossgen to application folder");
 
-                // Downloading corresponding package
-
-                var runtimePath = Path.Combine(_rootTempDir, "RuntimePackages", $"runtime.linux-x64.Microsoft.NETCore.App.{runtimeVersion}.nupkg");
-
-                // Ensure the folder already exists
-                Directory.CreateDirectory(Path.GetDirectoryName(runtimePath));
-
-                if (!File.Exists(runtimePath))
+                try
                 {
-                    Log.WriteLine($"Downloading runtime package");
-                    await DownloadFileAsync($"https://dotnet.myget.org/F/dotnet-core/api/v2/package/runtime.linux-x64.Microsoft.NETCore.App/{runtimeVersion}", runtimePath, maxRetries: 5, timeout: 60);
-                }
-                else
-                {
-                    Log.WriteLine($"Found runtime package at '{runtimePath}'");
-                }
+                    // Downloading corresponding package
 
-                using (var archive = ZipFile.OpenRead(runtimePath))
-                {
-                    foreach (var entry in archive.Entries)
+                    var runtimePath = Path.Combine(_rootTempDir, "RuntimePackages", $"runtime.linux-x64.Microsoft.NETCore.App.{runtimeVersion}.nupkg");
+
+                    // Ensure the folder already exists
+                    Directory.CreateDirectory(Path.GetDirectoryName(runtimePath));
+
+                    if (!File.Exists(runtimePath))
                     {
-                        if (entry.FullName.EndsWith("/crossgen", StringComparison.OrdinalIgnoreCase))
+                        Log.WriteLine($"Downloading runtime package");
+
+                        // For some unknown reason, the version on this feed is not aligned with the netcore.app one
+                        // See https://dotnetfeed.blob.core.windows.net/dotnet-coreclr/flatcontainer/runtime.linux-x64.microsoft.netcore.runtime.coreclr/index.json
+                        var segments = runtimeVersion.Split('-');
+                        segments[segments.Length - 1] = "7" + segments[segments.Length - 1];
+                        var hackedRuntimeVersion = String.Join("-", segments);
+
+                        var url = $"https://dotnetfeed.blob.core.windows.net/dotnet-coreclr/flatcontainer/runtime.linux-x64.microsoft.netcore.runtime.coreclr/{hackedRuntimeVersion}/runtime.linux-x64.microsoft.netcore.runtime.coreclr.{hackedRuntimeVersion}.nupkg";
+
+                        await DownloadFileAsync(url, runtimePath, maxRetries: 3, timeout: 60);
+                    }
+                    else
+                    {
+                        Log.WriteLine($"Found runtime package at '{runtimePath}'");
+                    }
+
+                    using (var archive = ZipFile.OpenRead(runtimePath))
+                    {
+                        foreach (var entry in archive.Entries)
                         {
-                            var crossgenFolder = job.SelfContained
-                                ? Path.Combine(outputFolder, "crossgen")
-                                : Path.Combine(dotnetDir, "shared", "Microsoft.NETCore.App", runtimeVersion)
-                                ;
-
-                            var crossgenFilename = Path.Combine(crossgenFolder, "crossgen");
-
-                            if (!File.Exists(crossgenFilename))
+                            if (entry.FullName.EndsWith("/crossgen", StringComparison.OrdinalIgnoreCase))
                             {
-                                entry.ExtractToFile(crossgenFilename);
-                                Log.WriteLine($"Copied crossgen to {crossgenFolder}");
-                            }
+                                var crossgenFolder = job.SelfContained
+                                    ? outputFolder
+                                    : Path.Combine(dotnetDir, "shared", "Microsoft.NETCore.App", runtimeVersion)
+                                    ;
 
-                            break;
+                                var crossgenFilename = Path.Combine(crossgenFolder, "crossgen");
+
+                                if (!File.Exists(crossgenFilename))
+                                {
+                                    // Ensure the target folder is created
+                                    Directory.CreateDirectory(Path.GetDirectoryName(crossgenFilename));
+
+                                    entry.ExtractToFile(crossgenFilename);
+                                    Log.WriteLine($"Copied crossgen to {crossgenFolder}");
+                                }
+
+                                break;
+                            }
                         }
                     }
+                }
+                catch (Exception e)
+                {
+                    Log.WriteLine("ERROR: Failed to download crossgen. " + e.ToString());
                 }
             }
 
@@ -1418,87 +1945,129 @@ namespace BenchmarkServer
                     File.Delete(filename);
                 }
 
+                Directory.CreateDirectory(Path.GetDirectoryName(filename));
+
                 File.Copy(attachment.TempFilename, filename);
                 File.Delete(attachment.TempFilename);
             }
 
-            return (benchmarkedDir, dotnetDir);
+            return benchmarkedDir;
+
+            long DirSize(DirectoryInfo d)
+            {
+                long size = 0;
+                // Add file sizes.
+                var fis = d.GetFiles();
+                foreach (var fi in fis)
+                {
+                    size += fi.Length;
+                }
+                // Add subdirectory sizes.
+                var dis = d.GetDirectories();
+                foreach (var di in dis)
+                {
+                    size += DirSize(di);
+                }
+                return size;
+            }
         }
 
         /// <summary>
         /// Retrieves the runtime version used on ASP.NET Coherence builds
         /// </summary>
-        private static async Task<string> GetLatestRuntimeVersion(string buildToolsPath)
+        private static async Task<string> GetAspNetRuntimeVersion(string buildToolsPath, string targetFramework)
         {
-            var universeDependenciesPath = Path.Combine(buildToolsPath, Path.GetFileName(_universeDependenciesUrl));
-            await DownloadFileAsync(_universeDependenciesUrl, universeDependenciesPath, maxRetries: 5, timeout: 10);
-            var latestRuntimeVersion = XDocument.Load(universeDependenciesPath).Root
-                .Element("PropertyGroup")
-                .Element("MicrosoftNETCoreAppPackageVersion")
-                .Value;
+            var aspNetCoreDependenciesPath = Path.Combine(buildToolsPath, Path.GetFileName(_aspNetCoreDependenciesUrl));
 
-            Log.WriteLine($"Detecting Universe Coherence runtime version: {latestRuntimeVersion}");
+            string latestRuntimeVersion = "";
+
+            switch (targetFramework)
+            {
+                case "netcoreapp2.1":
+
+                    await DownloadFileAsync(String.Format(_aspNetCoreDependenciesUrl, "release/2.1/build/dependencies.props"), aspNetCoreDependenciesPath, maxRetries: 5, timeout: 10);
+                    latestRuntimeVersion = XDocument.Load(aspNetCoreDependenciesPath).Root
+                        .Elements("PropertyGroup")
+                        .Select(x => x.Element("MicrosoftNETCoreAppPackageVersion"))
+                        .Where(x => x != null)
+                        .FirstOrDefault()
+                        .Value;
+
+                    break;
+
+                case "netcoreapp2.2":
+
+                    await DownloadFileAsync(String.Format(_aspNetCoreDependenciesUrl, "release/2.2/build/dependencies.props"), aspNetCoreDependenciesPath, maxRetries: 5, timeout: 10);
+                    latestRuntimeVersion = XDocument.Load(aspNetCoreDependenciesPath).Root
+                        .Elements("PropertyGroup")
+                        .Select(x => x.Element("MicrosoftNETCoreAppPackageVersion"))
+                        .Where(x => x != null)
+                        .FirstOrDefault()
+                        .Value;
+
+                    break;
+
+                case "netcoreapp3.0":
+
+                    await DownloadFileAsync(String.Format(_aspNetCoreDependenciesUrl, "master/eng/Versions.props"), aspNetCoreDependenciesPath, maxRetries: 5, timeout: 10);
+                    latestRuntimeVersion = XDocument.Load(aspNetCoreDependenciesPath).Root
+                        .Elements("PropertyGroup")
+                        .Select(x => x.Element("MicrosoftNETCoreAppRefPackageVersion"))
+                        .Where(x => x != null)
+                        .FirstOrDefault()
+                        .Value;
+
+                    break;
+            }
+
+            Log.WriteLine($"Detecting AspNetCore repository runtime version: {latestRuntimeVersion}");
             return latestRuntimeVersion;
         }
 
         /// <summary>
-        /// Retrieves the latest coherent ASP.NET version
+        /// Retrieves the current runtime version for a channel
         /// </summary>
-        private static async Task<string> GetLatestAspNetCoreRuntimeVersion(string buildToolsPath)
+        private static async Task<string> GetRuntimeChannelVersion(string channel)
         {
-            // This document contains links to pages of packages
-            // The 'lower' and 'upper' properties represent the range of version each pages contain
-            var aspnetCoreRuntimePath = Path.Combine(buildToolsPath, "aspnetCoreRuntimePath.json");
-            await DownloadFileAsync(_latestAspnetCoreRuntimeUrl, aspnetCoreRuntimePath, maxRetries: 5, timeout: 10);
-            var aspnetCoreRuntime = JObject.Parse(File.ReadAllText(aspnetCoreRuntimePath));
+            var content = await DownloadContentAsync(_releaseMetadata);
 
-            // Find the page which contains the latest 2.2 packages
-            var latestPageUrl = (string)aspnetCoreRuntime["items"].Where(t => ((string)t["lower"]).StartsWith("2.2")).Last()["@id"];
-            await DownloadFileAsync(latestPageUrl, aspnetCoreRuntimePath, maxRetries: 5, timeout: 10);
-            aspnetCoreRuntime = JObject.Parse(File.ReadAllText(aspnetCoreRuntimePath));
+            var index = JObject.Parse(content);
+            var channelDotnetRuntime = index.SelectToken($"$.releases-index[?(@.channel-version == '{channel}')].latest-runtime").ToString();
 
-            // Extract the highest 2.2 version
-            var latestAspNetCoreRuntime = (string)aspnetCoreRuntime["items"]
-                .Where(t => ((string)t["catalogEntry"]["version"]).StartsWith("2.2")).Last()
-                ["catalogEntry"]["version"]
-                ;
-
-            Log.WriteLine($"Detecting ASP.NET runtime version: {latestAspNetCoreRuntime}");
-            return latestAspNetCoreRuntime;
+            Log.WriteLine($"Detecting current runtime version for channel {channel}: {channelDotnetRuntime}");
+            return channelDotnetRuntime;
         }
 
         /// <summary>
-        /// Retrieves the latest runtime version
+        /// Retrieves the current sdk version for a channel
         /// </summary>
-        /// <param name="buildToolsPath"></param>
-        /// <returns></returns>
-        private static async Task<string> GetEdgeRuntimeVersion(string buildToolsPath)
+        private static async Task<string> GetReleasedSdkChannelVersion(string channel)
         {
-            var edgeRuntimePath = Path.Combine(buildToolsPath, "edgeDotnetRuntimeVersion.txt");
-            await DownloadFileAsync(_edgeDotnetRuntimeUrl, edgeRuntimePath, maxRetries: 5, timeout: 10);
-            var content = await File.ReadAllLinesAsync(edgeRuntimePath);
+            var content = await DownloadContentAsync(_releaseMetadata);
 
-            // Read the last line that contains the version
-            var edgeDotnetRuntime = content.Last();
+            var index = JObject.Parse(content);
+            var channelSdk = index.SelectToken($"$.releases-index[?(@.channel-version == '{channel}')].latest-sdk").ToString();
 
-            Log.WriteLine($"Detecting edge runtime version: {edgeDotnetRuntime}");
-            return edgeDotnetRuntime;
+            Log.WriteLine($"Detecting current SDK version for channel {channel}: {channelSdk}");
+            return channelSdk;
         }
 
         /// <summary>
-        /// Retrieves the Current runtime version
+        /// Parses files that contain two lines: a sha and a version
         /// </summary>
-        private static async Task<string> GetCurrentRuntimeVersion(string buildToolsPath)
+        private static async Task<string> ParseLatestVersionFile(string url)
         {
-            var currentRuntimePath = Path.Combine(buildToolsPath, "currentDotnetRuntimeVersion.txt");
-            await DownloadFileAsync(_currentDotnetRuntimeUrl, currentRuntimePath, maxRetries: 5, timeout: 10);
-            var content = await File.ReadAllLinesAsync(currentRuntimePath);
+            var content = await DownloadContentAsync(url);
 
-            // Read the last line that contains the version
-            var currentDotnetRuntime = content.Last();
+            string latestSdk;
+            using (var sr = new StringReader(content))
+            {
+                sr.ReadLine();
+                latestSdk = sr.ReadLine();
 
-            Log.WriteLine($"Detecting current runtime version: {currentDotnetRuntime}");
-            return currentDotnetRuntime;
+            }
+
+            return latestSdk;
         }
 
         private static async Task DownloadFileAsync(string url, string outputPath, int maxRetries, int timeout = 5)
@@ -1536,40 +2105,6 @@ namespace BenchmarkServer
             throw new InvalidOperationException($"Failed to download {url} after {maxRetries} attempts");
         }
 
-        private static async Task<string> ReadUrlStringAsync(string url, int maxRetries, int timeout = 5)
-        {
-            Log.WriteLine($"Downloading {url}");
-
-            for (var i = 0; i < maxRetries; ++i)
-            {
-                try
-                {
-                    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeout));
-                    var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseContentRead, cts.Token);
-                    response.EnsureSuccessStatusCode();
-
-                    // This probably won't use async IO on windows since the stream
-                    // needs to created with the right flags
-                    using (var stream = new MemoryStream())
-                    {
-                        // Copy the response stream directly to the file stream
-                        await response.Content.CopyToAsync(stream);
-                        return Encoding.UTF8.GetString(stream.ToArray());
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    Log.WriteLine($"Timeout trying to download {url}, attempt {i + 1}");
-                }
-                catch (Exception ex)
-                {
-                    Log.WriteLine($"Failed to download {url}, attempt {i + 1}, Exception: {ex}");
-                }
-            }
-
-            throw new InvalidOperationException($"Failed to download {url} after {maxRetries} attempts");
-        }
-
         private static string GetTempDir()
         {
             var temp = Path.Combine(_rootTempDir, Path.GetRandomFileName());
@@ -1586,8 +2121,13 @@ namespace BenchmarkServer
             }
         }
 
-        private static void DeleteDir(string path)
+        private static void TryDeleteDir(string path, bool rethrow = true)
         {
+            if (String.IsNullOrEmpty(path) || !Directory.Exists(path))
+            {
+                return;
+            }
+
             Log.WriteLine($"Deleting directory '{path}'");
 
             // Delete occasionally fails with the following exception:
@@ -1613,18 +2153,22 @@ namespace BenchmarkServer
                     Log.WriteLine("Nothing to do");
                     break;
                 }
-                catch (Exception e)
+                catch
                 {
-                    Log.WriteLine($"Error deleting directory: {e.ToString()}");
+                    Log.WriteLine("Error, retrying ...");
 
                     if (i < 9)
                     {
-                        Log.WriteLine("RETRYING");
                         Thread.Sleep(TimeSpan.FromSeconds(1));
                     }
                     else
                     {
-                        throw;
+                        Log.WriteLine("All retries failed");
+
+                        if (rethrow)
+                        {
+                            throw;
+                        }
                     }
                 }
             }
@@ -1637,15 +2181,24 @@ namespace BenchmarkServer
                 : Path.Combine(dotnetHome, "dotnet");
         }
 
-        private static async Task<Process> StartProcess(string hostname, string benchmarksRepo, ServerJob job, string dotnetHome, StringBuilder standardOutput)
+        private static async Task<Process> StartProcess(string hostname, string benchmarksRepo, ServerJob job, string dotnetHome, StringBuilder standardOutput, StringBuilder standardError)
         {
-            var workingDirectory = Path.Combine(benchmarksRepo, Path.GetDirectoryName(job.Source.Project));
+            var workingDirectory = Path.Combine(benchmarksRepo, Path.GetDirectoryName(FormatPathSeparators(job.Source.Project)));
             var scheme = (job.Scheme == Scheme.H2 || job.Scheme == Scheme.Https) ? "https" : "http";
             var serverUrl = $"{scheme}://{hostname}:{job.Port}";
             var executable = GetDotNetExecutable(dotnetHome);
-            var projectFilename = Path.GetFileNameWithoutExtension(job.Source.Project);
-            var benchmarksDll = Path.Combine("published", $"{projectFilename}.dll");
+            var projectFilename = Path.GetFileNameWithoutExtension(FormatPathSeparators(job.Source.Project));
+
+            var benchmarksDll = Path.Combine(workingDirectory, "published", $"{projectFilename}.dll");
             var iis = job.WebHost == WebHost.IISInProcess || job.WebHost == WebHost.IISOutOfProcess;
+
+            // Running BeforeScript
+            if (!String.IsNullOrEmpty(job.BeforeScript))
+            {
+                var segments = job.BeforeScript.Split(' ', 2);
+                var result = ProcessUtil.Run(segments[0], segments.Length > 1 ? segments[1] : "", workingDirectory: workingDirectory, log: true);
+                standardOutput.AppendLine(result.StandardOutput);
+            }
 
             var commandLine = benchmarksDll ?? "";
 
@@ -1669,11 +2222,6 @@ namespace BenchmarkServer
 
             var arguments = $" --nonInteractive true" +
                     $" --scenarios {job.Scenario}";
-
-            if (!string.IsNullOrEmpty(job.ConnectionFilter))
-            {
-                arguments += $" --connectionFilter {job.ConnectionFilter}";
-            }
 
             switch (job.WebHost)
             {
@@ -1715,6 +2263,8 @@ namespace BenchmarkServer
                 commandLine += $" {arguments}";
             }
 
+            // Benchmarkdotnet needs the actual cli path to generate its benchmarked app
+            commandLine = commandLine.Replace("{{benchmarks-cli}}", executable);
 
             if (iis)
             {
@@ -1723,6 +2273,27 @@ namespace BenchmarkServer
                 var apphost = GenerateApplicationHostConfig(job, "published", executable, commandLine, hostname);
                 commandLine = $"-h \"{apphost}\"";
                 executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"System32\inetsrv\w3wp.exe");
+            }
+
+            if (job.MemoryLimitInBytes > 0)
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                {
+                    Log.WriteLine($"Creating cgroup with memory limits: {job.MemoryLimitInBytes}");
+
+                    var cgcreate = ProcessUtil.Run("cgcreate", "-g memory:benchmarks\"");
+
+                    if (cgcreate.ExitCode > 0)
+                    {
+                        job.Error += "Could not create cgroup";
+                        return null;
+                    }
+
+                    ProcessUtil.Run("cgset", $"-r memory.limit_in_bytes={job.MemoryLimitInBytes} benchmarks");
+
+                    commandLine = $"-g memory:benchmarks {executable} {commandLine}";
+                    executable = "cgexec";
+                }
             }
 
             Log.WriteLine($"Invoking executable: {executable}, with arguments: {commandLine}");
@@ -1734,6 +2305,8 @@ namespace BenchmarkServer
                     Arguments = commandLine,
                     WorkingDirectory = workingDirectory,
                     RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    
                     UseShellExecute = false,
                 },
                 EnableRaisingEvents = true
@@ -1766,7 +2339,7 @@ namespace BenchmarkServer
                 process.StartInfo.Environment.Add("COMPlus_PerfMapEnabled", "1");
             }
 
-            foreach(var env in job.EnvironmentVariables)
+            foreach (var env in job.EnvironmentVariables)
             {
                 Log.WriteLine($"Setting ENV: {env.Key} = {env.Value}");
                 process.StartInfo.Environment.Add(env.Key, env.Value);
@@ -1782,87 +2355,221 @@ namespace BenchmarkServer
                     standardOutput.AppendLine(e.Data);
 
                     if (job.State == ServerState.Starting &&
-                        ((!String.IsNullOrEmpty(job.ReadyStateText) && e.Data.IndexOf(job.ReadyStateText, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        (((!String.IsNullOrEmpty(job.ReadyStateText) && e.Data.IndexOf(job.ReadyStateText, StringComparison.OrdinalIgnoreCase) >= 0) ||
                         e.Data.ToLowerInvariant().Contains("started") ||
-                        e.Data.ToLowerInvariant().Contains("listening")))
+                        e.Data.ToLowerInvariant().Contains("listening")) || job.IsConsoleApp))
                     {
-                        MarkAsRunning(hostname, benchmarksRepo, job, stopwatch, process);
+                        MarkAsRunning(hostname, job, stopwatch);
+
+                        if (!job.CollectStartup)
+                        {
+                            if (job.Collect)
+                            {
+                                StartCollection(Path.Combine(benchmarksRepo, job.BasePath), job);
+                            }
+
+                            if (job.CollectCounters)
+                            {
+                                StartCounters(job);
+                            }
+                        }
                     }
                 }
             };
 
-            // Start perfview?
-            if (job.Collect)
+            process.ErrorDataReceived += (_, e) =>
             {
-                if (OperatingSystem == OperatingSystem.Windows)
+                if (e != null && e.Data != null)
                 {
-                    job.PerfViewTraceFile = Path.Combine(job.BasePath, "benchmarks.etl.zip");
-                    var perfViewArguments = new Dictionary<string, string>();
-                    perfViewArguments["AcceptEula"] = "";
-                    perfViewArguments["NoGui"] = "";
-
-                    if (!String.IsNullOrEmpty(job.CollectArguments))
-                    {
-                        foreach (var tuple in job.CollectArguments.Split(';'))
-                        {
-                            var values = tuple.Split(new char[] { '=' }, 2);
-                            perfViewArguments[values[0]] = values.Length > 1 ? values[1] : "";
-                        }
-                    }
-
-                    var perfviewArguments = $"start";
-
-                    foreach (var customArg in perfViewArguments)
-                    {
-                        var value = String.IsNullOrEmpty(customArg.Value) ? "" : $"={customArg.Value}";
-                        perfviewArguments += $" /{customArg.Key}{value}";
-                    }
-
-                    perfviewArguments += $" \"{Path.Combine(job.BasePath, "benchmarks.trace")}\"";
-                    RunPerfview(perfviewArguments, Path.Combine(benchmarksRepo, job.BasePath));
-                    Log.WriteLine($"Starting PerfView {perfviewArguments}");
+                    Log.WriteLine("[ERROR] " + e.Data);
+                    standardError.AppendLine(e.Data);
                 }
-                else
+            };
+
+            if (job.CollectStartup)
+            {
+                if (job.Collect)
                 {
-                    var perfViewArguments = new Dictionary<string, string>();
-
-                    if (!String.IsNullOrEmpty(job.CollectArguments))
-                    {
-                        foreach (var tuple in job.CollectArguments.Split(';'))
-                        {
-                            var values = tuple.Split(new char[] { '=' }, 2);
-                            perfViewArguments[values[0]] = values.Length > 1 ? values[1] : "";
-                        }
-                    }
-
-                    var perfviewArguments = "collect benchmarks";
-
-                    foreach (var customArg in perfViewArguments)
-                    {
-                        var value = String.IsNullOrEmpty(customArg.Value) ? "" : $" {customArg.Value.ToLowerInvariant()}";
-                        perfviewArguments += $" -{customArg.Key}{value}";
-                    }
-
-                    job.PerfViewTraceFile = Path.Combine(job.BasePath, "benchmarks.trace.zip");
-                    perfCollectProcess = RunPerfcollect(perfviewArguments, Path.Combine(benchmarksRepo, job.BasePath));
+                    StartCollection(Path.Combine(benchmarksRepo, job.BasePath), job);
                 }
             }
 
             stopwatch.Start();
             process.Start();
             process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            if (job.CollectStartup)
+            {
+                if (job.CollectCounters)
+                {
+                    StartCounters(job);
+                }
+            }
+
+            if (job.MemoryLimitInBytes > 0)
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    Log.WriteLine($"Creating job oject with memory limits: {job.MemoryLimitInBytes}");
+
+                    var manager = new ChildProcessManager(job.MemoryLimitInBytes);
+                    manager.AddProcess(process);
+
+                    process.Exited += (sender, e) =>
+                    {
+                        Log.WriteLine("Releasing job object");
+                        manager.Dispose();
+                    };
+                }
+            }
 
             if (iis)
             {
                 await WaitToListen(job, hostname);
-                MarkAsRunning(hostname, benchmarksRepo, job, stopwatch, process);
+                MarkAsRunning(hostname, job, stopwatch);
+
+                if (!job.CollectStartup)
+                {
+                    if (job.Collect)
+                    {
+                        StartCollection(Path.Combine(benchmarksRepo, job.BasePath), job);
+                    }
+
+                    if (job.CollectCounters)
+                    {
+                        StartCounters(job);
+                    }
+                }
             }
 
             return process;
         }
 
-        private static void MarkAsRunning(string hostname, string benchmarksRepo, ServerJob job, Stopwatch stopwatch,
-            Process process)
+        private static void StartCounters(ServerJob job)
+        {
+            eventPipeTerminated = false;
+            eventPipeTask = new Task(() =>
+            {
+                Log.WriteLine("Listening to event pipes");
+
+                try
+                {
+                    var providerList = new List<Provider>()
+                        {
+                        new Provider(
+                            name: "System.Runtime",
+                            eventLevel: EventLevel.Informational,
+                            filterData: "EventCounterIntervalSec=1"),
+                        };
+
+                    var configuration = new SessionConfiguration(
+                            circularBufferSizeMB: 1000,
+                            format: EventPipeSerializationFormat.NetTrace,
+                            providers: providerList);
+
+                    var binaryReader = EventPipeClient.CollectTracing(job.ProcessId, configuration, out eventPipeSessionId);
+                    var source = new EventPipeEventSource(binaryReader);
+                    source.Dynamic.All += (eventData) =>
+                    {
+                        // We only track event counters
+                        if (!eventData.EventName.Equals("EventCounters"))
+                        {
+                            return;
+                        }
+
+                        var payloadVal = (IDictionary<string, object>)(eventData.PayloadValue(0));
+                        var payloadFields = (IDictionary<string, object>)(payloadVal["Payload"]);
+
+                        var counterName = payloadFields["Name"].ToString();
+                        if (!job.Counters.TryGetValue(counterName, out var values))
+                        {
+                            lock (job.Counters)
+                            {
+                                if (!job.Counters.TryGetValue(counterName, out values))
+                                {
+                                    job.Counters[counterName] = values = new ConcurrentQueue<string>();
+                                }
+                            }
+                        }
+
+                        switch (payloadFields["CounterType"])
+                        {
+                            case "Sum": values.Enqueue(payloadFields["Increment"].ToString()); break;
+                            case "Mean": values.Enqueue(payloadFields["Mean"].ToString()); break;
+                            default: Log.WriteLine($"Unknown CounterType: {payloadFields["CounterType"]}"); break;
+                        }
+                    };
+
+                    source.Process();
+                }
+                catch (Exception ex)
+                {
+                    Log.WriteLine($"[ERROR] {ex.ToString()}");
+                }
+                finally
+                {
+                    eventPipeTerminated = true; // This indicates that the runtime is done. We shouldn't try to talk to it anymore.
+                }
+            });
+
+            eventPipeTask.Start();
+        }
+
+        private static void StartCollection(string workingDirectory, ServerJob job)
+        {
+            if (OperatingSystem == OperatingSystem.Windows)
+            {
+                job.PerfViewTraceFile = Path.Combine(job.BasePath, "benchmarks.etl.zip");
+                var perfViewArguments = new Dictionary<string, string>();
+
+                if (!String.IsNullOrEmpty(job.CollectArguments))
+                {
+                    foreach (var tuple in job.CollectArguments.Split(';'))
+                    {
+                        var values = tuple.Split(new char[] { '=' }, 2);
+                        perfViewArguments[values[0]] = values.Length > 1 ? values[1] : "";
+                    }
+                }
+
+                _startPerfviewArguments = $"";
+
+                foreach (var customArg in perfViewArguments)
+                {
+                    var value = String.IsNullOrEmpty(customArg.Value) ? "" : $"={customArg.Value}";
+                    _startPerfviewArguments += $" /{customArg.Key}{value}";
+                }
+
+                RunPerfview($"start /AcceptEula /NoGui {_startPerfviewArguments} \"{Path.Combine(job.BasePath, "benchmarks.trace")}\"", workingDirectory);
+                Log.WriteLine($"Starting PerfView {_startPerfviewArguments}");
+            }
+            else
+            {
+                var perfViewArguments = new Dictionary<string, string>();
+
+                if (!String.IsNullOrEmpty(job.CollectArguments))
+                {
+                    foreach (var tuple in job.CollectArguments.Split(';'))
+                    {
+                        var values = tuple.Split(new char[] { '=' }, 2);
+                        perfViewArguments[values[0]] = values.Length > 1 ? values[1] : "";
+                    }
+                }
+
+                var perfviewArguments = "collect benchmarks";
+
+                foreach (var customArg in perfViewArguments)
+                {
+                    var value = String.IsNullOrEmpty(customArg.Value) ? "" : $" {customArg.Value.ToLowerInvariant()}";
+                    perfviewArguments += $" -{customArg.Key}{value}";
+                }
+
+                job.PerfViewTraceFile = Path.Combine(job.BasePath, "benchmarks.trace.zip");
+                perfCollectProcess = RunPerfcollect(perfviewArguments, workingDirectory);
+            }
+        }
+
+        private static void MarkAsRunning(string hostname, ServerJob job, Stopwatch stopwatch)
         {
             lock (job)
             {
@@ -1946,6 +2653,78 @@ namespace BenchmarkServer
             return name;
         }
 
+        private static async Task<string> DownloadContentAsync(string url, int maxRetries = 3, int timeout = 5)
+        {
+            for (var i = 0; i < maxRetries; ++i)
+            {
+                try
+                {
+                    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeout));
+                    return await _httpClient.GetStringAsync(url);
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine($"Error while downloading {url}:");
+                    Console.WriteLine(e);
+                }
+            }
+
+            throw new ApplicationException($"Error while downloading {url} after {maxRetries} attempts");
+        }
+
+        private static async Task<string> GetLatestPackageVersion(string packageIndexUrl, string versionPrefix)
+        {
+            Log.WriteLine($"Downloading package metadata ...");
+            var index = JObject.Parse(await DownloadContentAsync(packageIndexUrl));
+
+            var compatiblePages = index["items"].Where(t => ((string)t["lower"]).StartsWith(versionPrefix)).ToArray();
+
+            // All versions might be comprised in a single page, with lower and upper bounds not matching the prefix
+            if (!compatiblePages.Any())
+            {
+                compatiblePages = index["items"].ToArray();
+            }
+
+            foreach (var page in compatiblePages.Reverse())
+            {
+                var lastPageUrl = (string)page["@id"];
+
+                var lastPage = JObject.Parse(await DownloadContentAsync(lastPageUrl));
+
+                var entries = packageIndexUrl.Contains("myget", StringComparison.OrdinalIgnoreCase)
+                                    ? lastPage["items"]
+                                    : lastPage["items"][0]["items"]
+                                    ;
+
+                // Extract the highest version
+                var lastEntry = entries
+                    .Where(t => ((string)t["catalogEntry"]["version"]).StartsWith(versionPrefix)).LastOrDefault();
+
+                if (lastEntry != null)
+                {
+                    return (string)lastEntry["catalogEntry"]["version"];
+                }
+            }
+
+            return null;
+        }
+
+        private static async Task<string> GetFlatContainerVersion(string packageIndexUrl, string versionPrefix)
+        {
+            Log.WriteLine($"Downloading flatcontainer ...");
+            var root = JObject.Parse(await DownloadContentAsync(packageIndexUrl));
+
+            // Extract the highest version
+            var lastEntry = root["versions"].Reverse().Where(t => t.ToString().StartsWith(versionPrefix)).FirstOrDefault();
+
+            if (lastEntry != null)
+            {
+                return lastEntry.ToString();
+            }
+
+            return null;
+        }
+
         // Compares just the repository name
         private class SourceRepoComparer : IEqualityComparer<Source>
         {
@@ -1959,6 +2738,18 @@ namespace BenchmarkServer
             public int GetHashCode(Source obj)
             {
                 return StringComparer.OrdinalIgnoreCase.GetHashCode(GetRepoName(obj));
+            }
+        }
+
+        private static string FormatPathSeparators(string path)
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                return path.Replace("\\", "/");
+            }
+            else
+            {
+                return path.Replace("/", "\\");
             }
         }
 

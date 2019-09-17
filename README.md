@@ -58,14 +58,14 @@ This will create and run a Docker image containing PostgreSql and the Fortunes d
 On your computer,
 
 - Clone https://github.com/aspnet/benchmarks on the __master__ branch
-- Run `cd src/BenchmarkDriver`
+- Run `cd src/BenchmarksDriver`
 - Then run the following command after replacing the IP addresses to the ones you are using, 
 ```
-dotnet run -c Debug `
- --server "http://10.0.0.102:5001" `
- --client "http://10.0.0.101:5002" `
- --jobs "../Benchmarks/benchmarks.Json.json" `
- -n Json
+dotnet run -c Debug \
+ --server "http://10.0.0.102:5001" \
+ --client "http://10.0.0.101:5002" \
+ --jobs "../Benchmarks/benchmarks.json.json" \
+ --scenario Json
 ```
 
 This will start the `Json` scenario using the `Benchmarks` application that is provided in https://github.com/aspnet/benchmarks/tree/master/src/Benchmarks.

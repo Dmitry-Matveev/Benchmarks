@@ -6,16 +6,18 @@ using System.IO;
 using System.Net;
 using System.Reflection;
 using System.Runtime;
+using System.Text.RegularExpressions;
 using System.Threading;
 using Benchmarks.Configuration;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.HttpSys;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
-using Microsoft.AspNetCore.Server.Kestrel.Core.Adapter.Internal;
+#if !NETCOREAPP3_0
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Abstractions.Internal;
-using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets;
+#endif
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Benchmarks
@@ -35,7 +37,12 @@ namespace Benchmarks
             Console.WriteLine("-----------------------");
 
             Console.WriteLine($"Current directory: {Directory.GetCurrentDirectory()}");
-            Console.WriteLine($"WebHostBuilder loading from: {typeof(WebHostBuilder).GetTypeInfo().Assembly.Location}");
+            Console.WriteLine($"AspNetCore location: {typeof(WebHostBuilder).GetTypeInfo().Assembly.Location}");
+            Console.WriteLine($"AspNetCore version: {typeof(WebHostBuilder).GetTypeInfo().Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion}");
+
+            Console.WriteLine($"NetCoreApp location: {typeof(object).GetTypeInfo().Assembly.Location}");
+            Console.WriteLine($"CoreCLR version: {typeof(object).GetTypeInfo().Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion}");
+            Console.WriteLine($"CoreFx version: {typeof(Regex).GetTypeInfo().Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion}");
 
             var config = new ConfigurationBuilder()
                 .AddJsonFile("hosting.json", optional: true)
@@ -55,6 +62,7 @@ namespace Benchmarks
                 {
                     if (Enum.TryParse(config["LogLevel"], out LogLevel logLevel))
                     {
+                        Console.WriteLine($"Console Logging enabled with level '{logLevel}'");
                         loggerFactory.AddConsole().SetMinimumLevel(logLevel);
                     }
                 })
@@ -62,6 +70,16 @@ namespace Benchmarks
                     .AddSingleton(new ConsoleArgs(args))
                     .AddSingleton<IScenariosConfiguration, ConsoleHostScenariosConfiguration>()
                     .AddSingleton<Scenarios>()
+                    .Configure<LoggerFilterOptions>(options =>
+                    {
+#if NETCOREAPP3_0
+                        if (Boolean.TryParse(config["DisableScopes"], out var disableScopes) && disableScopes)
+                        {
+                            Console.WriteLine($"LoggerFilterOptions.CaptureScopes = false");
+                            options.CaptureScopes = false;
+                        }
+#endif
+                    })
                 )
                 .UseDefaultServiceProvider(
                     (context, options) => options.ValidateScopes = context.HostingEnvironment.IsDevelopment());
@@ -84,6 +102,7 @@ namespace Benchmarks
                     {
                         Listen(options, config, "http://localhost:5000/");
                     }
+#if !NETCOREAPP3_0
 
                     var kestrelThreadPoolDispatchingValue = config["KestrelThreadPoolDispatching"];
                     if (kestrelThreadPoolDispatchingValue != null)
@@ -97,6 +116,7 @@ namespace Benchmarks
                             options.ApplicationSchedulingMode = SchedulingMode.Inline;
                         }
                     }
+#endif
                 });
 
                 var threadCount = GetThreadCount(config);
@@ -152,16 +172,16 @@ namespace Benchmarks
             {
                 webHostBuilder = webHostBuilder.UseHttpSys();
             }
-#if NETCOREAPP2_2
-            else if (String.Equals(Server, "IISInProcess", StringComparison.OrdinalIgnoreCase))
-            {
-                webHostBuilder = webHostBuilder.UseIIS();
-            }
-#endif
-            else if (String.Equals(Server, "IISOutOfProcess", StringComparison.OrdinalIgnoreCase))
-            {
-                webHostBuilder = webHostBuilder.UseKestrel().UseIISIntegration();
-            }
+//#if NETCOREAPP2_2 || NETCOREAPP3_0
+//            else if (String.Equals(Server, "IISInProcess", StringComparison.OrdinalIgnoreCase))
+//            {
+//                webHostBuilder = webHostBuilder.UseIIS();
+//            }
+//#endif
+//            else if (String.Equals(Server, "IISOutOfProcess", StringComparison.OrdinalIgnoreCase))
+//            {
+//                webHostBuilder = webHostBuilder.UseKestrel().UseIISIntegration();
+//            }
             else
             {
                 throw new InvalidOperationException($"Unknown server value: {Server}");
@@ -238,20 +258,6 @@ namespace Benchmarks
             return threadCountValue == null ? -1 : int.Parse(threadCountValue);
         }
 
-        private static IConnectionAdapter GetConnectionFilter(IConfigurationRoot config)
-        {
-            var connectionFilterValue = config["connectionFilter"];
-            if (string.IsNullOrEmpty(connectionFilterValue))
-            {
-                return null;
-            }
-            else
-            {
-                var connectionFilterType = Type.GetType(connectionFilterValue, throwOnError: true);
-                return (IConnectionAdapter)Activator.CreateInstance(connectionFilterType);
-            }
-        }
-
         private static void Listen(KestrelServerOptions options, IConfigurationRoot config, string url)
         {
             var urlPrefix = UrlPrefix.Create(url);
@@ -259,18 +265,12 @@ namespace Benchmarks
 
             options.Listen(endpoint, listenOptions =>
             {
-                var connectionFilter = GetConnectionFilter(config);
-                if (connectionFilter != null)
-                {
-                    listenOptions.ConnectionAdapters.Add(connectionFilter);
-                }
-
-#if NETCOREAPP2_2
-                if (urlPrefix.IsHttps)
+#if !NETCOREAPP2_0 && !NETCOREAPP2_1
+                if (Protocol.Equals("h2", StringComparison.OrdinalIgnoreCase))
                 {
                     listenOptions.Protocols = HttpProtocols.Http1AndHttp2;
                 }
-                else if (Protocol.StartsWith("h2", StringComparison.OrdinalIgnoreCase))
+                else if (Protocol.Equals("h2c", StringComparison.OrdinalIgnoreCase))
                 {
                     listenOptions.Protocols = HttpProtocols.Http2;
                 }

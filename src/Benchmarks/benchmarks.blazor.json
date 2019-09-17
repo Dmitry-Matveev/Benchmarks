@@ -1,0 +1,19 @@
+{
+  "Default": {
+    "Client": "BlazorIgnitor",
+    "Source": {
+      "Repository": "https://github.com/aspnet/AspNetCore.git",
+      "BranchOrCommit": "release/3.1",
+      "Project": "src/Components/benchmarkapps/BlazingPizza.Server/BlazingPizza.Server.csproj"
+    }
+  },
+  "Basic": {
+    "ClientProperties": { "Scenario": "Basic" }
+  },
+  "FormInput": {
+    "ClientProperties": { "Scenario": "FormInput" }
+  },
+  "BackgroundUpdates": {
+    "ClientProperties": { "Scenario": "BackgroundUpdates" }
+  }
+}
